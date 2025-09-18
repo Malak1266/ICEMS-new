@@ -1,6 +1,10 @@
 # Environnement virtuel Python
 surgical_expertise_env/
 
+# Gros fichiers de données (>50MB)
+data/raw_data.json
+data/full_data.json
+
 # Fichiers Python
 __pycache__/
 *.py[cod]
