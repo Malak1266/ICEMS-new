@@ -4,6 +4,11 @@ surgical_expertise_env/
 # Gros fichiers de données (>50MB)
 data/raw_data.json
 data/full_data.json
+data/filtered_data.json
+data/final_data_normalized_with_levels.pkl
+data/final_data_normalized_with_levels_original.pkl
+data/*.pkl
+data/*.json
 
 # Fichiers Python
 __pycache__/
