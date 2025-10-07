@@ -10,6 +10,14 @@ data/final_data_normalized_with_levels_original.pkl
 data/*.pkl
 data/*.json
 
+# Fichiers d'analyse des données manquantes
+data/missing_data.json
+
+# Résultats d'analyse
+analyse_missing_data_result/
+*.csv
+*.png
+
 # Fichiers Python
 __pycache__/
 *.py[cod]

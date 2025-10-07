@@ -1,441 +1,380 @@
-# 🏥 ICEMS - Surgical Expertise Prediction Model
+# 🏥 Surgical Instrument Tracking Analysis Tool
 
-## Modèle Hybride de Prédiction d'Expertise Chirurgicale
+## 📖 Description
 
-[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.19.0-FF6F00?style=flat-square&logo=tensorflow)](https://tensorflow.org/)
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python)](https://python.org/)
+Outil d'analyse avancé pour évaluer la qualité du tracking des instruments chirurgicaux dans des données de simulation neurochirurgicale. Le script analyse les données de détection d'instruments et génère des rapports complets sur les performances de tracking avec visualisations et identification des cas problématiques.
+
+[![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=flat-square&logo=python)](https://python.org/)
+[![Pandas](https://img.shields.io/badge/Pandas-Latest-150458?style=flat-square&logo=pandas)](https://pandas.pydata.org/)
+[![Matplotlib](https://img.shields.io/badge/Matplotlib-Latest-11557c?style=flat-square)](https://matplotlib.org/)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+## 🎯 Fonctionnalités Principales
 
-Ce projet implémente un **modèle de deep learning hybride avancé** pour prédire le niveau d'expertise chirurgicale à partir de données de simulation neurochirurgicale. Le système combine les architectures **Transformer**, **LSTM**, **GRU** et **CNN** pour classifier 9 niveaux d'expertise distincts, allant d'étudiant en médecine au personnel senior.
+### ✨ Analyses Effectuées
+- **📊 Statistiques descriptives** : Moyennes, médianes, écarts-types pour tous les champs
+- **📈 Visualisations** : Histogrammes et distributions pour chaque métrique
+- **👥 Analyse par participant** : Performance moyenne par participant
+- **🔧 Analyse par instrument** : Performance par type d'instrument (grasper, scissors, drill)
+- **🚨 Détection des cas problématiques** : Identification automatique des cas avec fraction < 0.5
+- **🏆 Classement des pires cas** : Top des combinaisons participant-trial-instrument les plus problématiques
+- **💾 Export de données** : Sauvegarde en CSV et rapports textuels
 
----
-
-## 🎯 Objectifs du Projet
-
-- **Classification multi-classe** : Prédiction de 9 niveaux d'expertise chirurgicale
-- **Architecture hybride** : Combinaison optimale de Transformer + LSTM + GRU + CNN
-- **Gestion du déséquilibre** : Techniques avancées pour équilibrer les classes rares
-- **Évaluation complète** : Métriques spécialisées et matrices de confusion détaillées
-
----
-
-## 📊 Niveaux d'Expertise Chirurgicale
-
-Le modèle classifie **9 niveaux d'expertise** basés sur la formation médicale :
-
-| Niveau | Description | Score Continu |
-|--------|-------------|---------------|
-| 0 | Medical Student | 0.000 |
-| 1 | Resident PGY1 | 0.125 |
-| 2 | Resident PGY2 | 0.250 |
-| 3 | Resident PGY3 | 0.375 |
-| 4 | Resident PGY4 | 0.500 |
-| 5 | Resident PGY5 | 0.625 |
-| 6 | Resident PGY6 | 0.750 |
-| 7 | Fellow (toutes spécialités) | 0.875 |
-| 8 | Staff | 1.000 |
-
----
-
-## 🏗️ Architecture du Modèle Hybride
-
-### Composants Principaux
-
-```
-📡 INPUT (50 timesteps × features)
-    ↓
-🧠 FEATURE PROJECTION (256D) + Positional Encoding
-    ↓
-┌─────────────────────────────────────────────────────────┐
-│  🔄 TRANSFORMER ENCODER (2 blocs)                      │
-│  • Multi-Head Attention (8 têtes)                      │
-│  • Feed-Forward Networks                               │
-│  • Residual Connections + Layer Normalization          │
-└─────────────────────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────────────────────┐
-│  🔁 LSTM BIDIRECTIONNEL (2 niveaux)                   │
-│  • LSTM Primaire : 128 unités                         │
-│  • LSTM Secondaire : 96 unités                        │
-│  • Dropout & Batch Normalization                      │
-└─────────────────────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────────────────────┐
-│  ⚡ GRU BIDIRECTIONNEL (2 niveaux)                     │
-│  • GRU Primaire : 96 unités                           │
-│  • GRU Secondaire : 64 unités                         │
-│  • Optimisé pour capture temporelle                   │
-└─────────────────────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────────────────────┐
-│  🔲 CNN 1D (Patterns locaux)                          │
-│  • Conv1D : 128 + 256 filtres                         │
-│  • Détection de motifs chirurgicaux                   │
-└─────────────────────────────────────────────────────────┘
-                    ↓
-🔗 FUSION CROSS-ATTENTION
-                    ↓
-📊 MULTI-SCALE POOLING
-    • Global Max/Average Pooling
-    • Attention Temporelle Pondérée
-    • Pooling Multi-Segments
-                    ↓
-🎯 CLASSIFICATION HEAD (512→256→128→9 classes)
-```
-
-### Innovations Techniques
-
-- **Focal Loss** : Gestion optimisée des classes déséquilibrées
-- **Poids de classe adaptatifs** : Boost spécial pour les niveaux critiques
-- **Augmentation de données chirurgicale** : Techniques spécialisées
-- **Cross-attention fusion** : Intégration intelligente des features
-- **Multi-scale pooling** : Capture d'informations à différentes échelles
+### 📋 Métriques Analysées
+- **`captured_time`** : Temps total de capture de l'instrument (secondes)
+- **`inuse_time`** : Temps total d'utilisation de l'instrument (secondes)  
+- **`captured_frames`** : Nombre de frames où l'instrument a été détecté
+- **`inuse_frames`** : Nombre total de frames où l'instrument était en cours d'utilisation
+- **`fraction`** : Ratio de détection (captured_time/inuse_time ou captured_frames/inuse_frames)
 
 ---
 
 ## 📁 Structure du Projet
 
 ```
-ICEMS/
-├── 📓 hybrid_model_clean.ipynb    # Notebook principal avec modèle hybride
-├── 🐍 data_process.py             # Processeur de données chirurgicales
-├── 🧪 test.py                     # Script de test et validation
-├── ⚙️ setup_environment.py        # Configuration automatique Python
-├── 🔧 setup_environment.ps1       # Configuration PowerShell
-├── 📋 requirements.txt            # Dépendances Python
-│
-├── 📊 data/                       # Données chirurgicales
-│   ├── Exvivo_trial_Participants(Sheet1).csv    # Métadonnées participants
-│   ├── full_data.json                           # Données complètes JSON
-│   ├── final_data_normalized_with_levels.pkl    # Données preprocessées
-│   ├── filtered_data.json                       # Données filtrées
-│   └── raw_data.json                           # Données brutes
-│
-├── 🎯 model_outputs/              # Résultats et modèles sauvegardés
-│   ├── hybrid_surgical_best.keras              # Meilleur modèle
-│   ├── results_final.json                      # Résultats détaillés
-│   ├── scaler.pkl                             # Normalisateur
-│   ├── performance_report.txt                  # Rapport de performance
-│   └── *.png                                   # Visualisations
-│
-└── 🏥 surgical_expertise_env/     # Environnement virtuel Python
-    ├── Scripts/                   # Exécutables (Windows)
-    ├── Lib/site-packages/        # Packages installés
-    └── pyvenv.cfg                 # Configuration environnement
+📦 Surgical Analysis Tool
+├── 📄 analyze_missing_data.py      # Script principal d'analyse
+├── 📄 requirements.txt             # Dépendances Python
+├── 📄 setup_environment.ps1        # Script PowerShell de configuration
+├── 📄 setup_environment.py         # Script Python de configuration
+├── 📄 test.py                      # Script de test
+├── 📁 data/                        # Dossier des données (exclu de Git)
+│   ├── 📄 missing_data.json        # Fichier de données principal
+│   ├── 📄 *.csv                    # Autres fichiers de données
+│   └── 📄 *.pkl                    # Fichiers de données sérialisées
+├── 📁 surgical_expertise_env/      # Environnement virtuel Python (exclu de Git)
+└── 📁 analyse_missing_data_result/ # Résultats d'analyse (exclu de Git)
+    ├── 📄 *.png                    # Graphiques générés
+    ├── 📄 *.csv                    # Données exportées
+    └── 📄 *.txt                    # Rapports textuels
 ```
 
 ---
 
-## ⚡ Installation Rapide
+## 🚀 Installation et Configuration
 
-### Prérequis
-- **Python 3.10+**
-- **Git**
-- **8GB RAM minimum** (16GB recommandé)
-- **GPU optionnel** (accélération CUDA)
+### 1️⃣ Prérequis
+- **Python 3.8+** installé sur votre système
+- **PowerShell** (pour Windows) ou **Terminal** (pour macOS/Linux)
+- **Git** (optionnel, pour le clonage du repository)
 
-### 1. Cloner le Projet
+### 2️⃣ Cloner le Projet
 ```bash
 git clone https://github.com/D3MIA/ICEMS.git
 cd ICEMS
 ```
 
-### 2. Configuration Automatique (Recommandé)
+### 3️⃣ Configuration Automatique (Recommandée)
 
-#### 🐍 Configuration Python
-```bash
-python setup_environment.py
-```
-
-#### 💻 Configuration PowerShell (Windows)
+#### Windows (PowerShell)
 ```powershell
+# Exécuter le script de configuration automatique
 .\setup_environment.ps1
-```
-
-### 3. Activation de l'Environnement
-
-#### Windows
-```cmd
-surgical_expertise_env\Scripts\activate
 ```
 
 #### Linux/macOS
 ```bash
-source surgical_expertise_env/bin/activate
-```
-
-### 4. Installation Manuelle (Alternative)
-```bash
-# Créer environnement virtuel
-python -m venv surgical_expertise_env
-
-# Activer environnement
-# Windows: surgical_expertise_env\Scripts\activate
-# Linux/macOS: source surgical_expertise_env/bin/activate
-
-# Installer dépendances
-pip install -r requirements.txt
-
-# Configurer kernel Jupyter
-python -m ipykernel install --user --name=surgical_expertise_env
-```
-
----
-
-## 🚀 Utilisation
-
-### 1. Traitement des Données
-```bash
-# Convertir les données JSON en format PKL
-python data_process.py
-```
-
-### 2. Entraînement du Modèle
-
-#### Via Jupyter Notebook (Recommandé)
-```bash
-jupyter notebook
-# Ouvrir hybrid_model_clean.ipynb
-# Sélectionner le kernel 'surgical_expertise_env'
-# Exécuter toutes les cellules
-```
-
-#### Via Script Python
-```bash
-python test.py
-```
-
-### 3. Évaluation et Résultats
-
-Les résultats sont automatiquement sauvegardés dans `model_outputs/` :
-- **Modèle entraîné** : `hybrid_surgical_best.keras`
-- **Résultats JSON** : `results_final.json`
-- **Rapport détaillé** : `performance_report.txt`
-- **Visualisations** : `*.png`
-
----
-
-## 📈 Performances du Modèle
-
-### Métriques Principales
-- **Architecture** : Hybrid Transformer+LSTM+GRU+CNN
-- **Paramètres** : ~2M paramètres optimisés
-- **Accuracy 9 classes** : Variable selon distribution des données
-- **Accuracy 6 classes regroupées** : Amélioration significative
-- **Temps d'entraînement** : ~5-15 minutes (GPU) / 30-60 minutes (CPU)
-
-### Optimisations Spécialisées
-- ✅ **Focal Loss** pour classes déséquilibrées
-- ✅ **Poids adaptatifs** avec boost pour niveaux critiques
-- ✅ **Augmentation de données** chirurgicale
-- ✅ **Régularisation avancée** (L1/L2, Dropout, BatchNorm)
-- ✅ **Callbacks intelligents** (EarlyStopping, ReduceLR)
-
-### Classes Critiques Identifiées
-- **PGY2-PGY4** : Niveaux intermédiaires nécessitant boost
-- **Fellow spécialisés** : Regroupement optimisé
-- **Regroupement 6 classes** : Amélioration de performance
-
----
-
-## 🔧 Configuration Avancée
-
-### Paramètres du Modèle
-```python
-# Paramètres modifiables dans hybrid_model_clean.ipynb
-SEQUENCE_LENGTH = 50        # Longueur des séquences temporelles
-BATCH_SIZE = 500           # Taille des lots d'entraînement
-EPOCHS = 100               # Nombre d'époques maximum
-LEARNING_RATE = 0.0008     # Taux d'apprentissage initial
-DROPOUT_RATE = 0.1-0.4     # Taux de dropout par couche
-```
-
-### Techniques d'Augmentation
-```python
-# Augmentation spécialisée chirurgicale
-- Bruit adaptatif basé expertise (1-3%)
-- Décalage temporel (-3 à +4 timesteps)
-- Mise à l'échelle (±5-10%)
-- Masquage temporel partiel
-```
-
-### Équilibrage des Classes
-```python
-# Boost spécialisé pour classes critiques
-ultra_critical_boost = {
-    2: 2.0,  # PGY2
-    3: 2.5,  # PGY3  
-    4: 3.0,  # PGY4
-    5: 2.0,  # PGY5
-    6: 1.8   # PGY6
-}
-```
-
----
-
-## 📊 Analyse des Données
-
-### Source des Données
-- **Origine** : Simulations neurochirurgicales ex-vivo
-- **Participants** : 1000+ essais de chirurgiens à différents niveaux
-- **Features** : Métriques temporelles de performance chirurgicale
-- **Collecte** : 2022, essais contrôlés avec métadonnées
-
-### Prétraitement
-1. **Conversion JSON → PKL** via `data_process.py`
-2. **Normalisation Z-score** des features temporelles
-3. **Création de séquences** de longueur fixe (50 timesteps)
-4. **Mapping d'expertise** vers 9 niveaux discrets
-5. **Division stratifiée** : 60% train / 20% val / 20% test
-
-### Distribution des Classes
-- **Déséquilibre naturel** : Plus d'étudiants que de seniors
-- **Classes rares** : Fellows spécialisés, PGY intermédiaires
-- **Solutions** : Poids adaptatifs, Focal Loss, augmentation ciblée
-
----
-
-## 🔍 Métriques et Évaluation
-
-### Métriques de Classification
-- **Accuracy globale** : Performance sur 9 classes
-- **Accuracy par classe** : Détection des classes problématiques
-- **Matrices de confusion** : Visualisation des erreurs
-- **Rapport de classification** : Précision, Rappel, F1-score
-
-### Métriques de Régression (Simulées)
-- **R² Score** : Corrélation avec scores continus d'expertise
-- **MAE** : Erreur absolue moyenne sur échelle 0-1
-- **MSE** : Erreur quadratique moyenne
-
-### Visualisations Automatiques
-- 📊 **Matrices de confusion** (9 et 6 classes)
-- 📈 **Courbes d'entraînement** (Loss, Accuracy, LR)
-- 🎯 **Distribution des prédictions**
-- 📋 **Rapport de performance détaillé**
-
----
-
-## 🛠️ Dépendances Principales
-
-### Deep Learning
-- **TensorFlow 2.19.0** : Framework principal
-- **NumPy ≥1.26.0** : Calculs numériques
-- **Scikit-learn ≥1.7.0** : Métriques et preprocessing
-
-### Visualisation
-- **Matplotlib ≥3.10.0** : Graphiques de base
-- **Seaborn ≥0.13.0** : Visualisations statistiques
-- **Plotly ≥5.15.0** : Graphiques interactifs
-
-### Environnement
-- **Jupyter ≥1.0.0** : Notebooks interactifs
-- **Pandas ≥2.0.0** : Manipulation de données
-- **TensorBoard ≥2.13.0** : Monitoring d'entraînement
-
----
-
-## 🚨 Résolution de Problèmes
-
-### Erreurs Communes
-
-#### 1. Erreur de GPU/CUDA
-```bash
-# Vérifier disponibilité GPU
-python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
-
-# Si pas de GPU, le modèle s'adapte automatiquement au CPU
-```
-
-#### 2. Problème de Mémoire
-```python
-# Réduire batch_size dans hybrid_model_clean.ipynb
-train_config = {
-    'batch_size': 256,  # Réduire de 500 à 256
-    # ...
-}
-```
-
-#### 3. Données Manquantes
-```bash
-# Vérifier présence des fichiers de données
-ls data/
-# Doit contenir: final_data_normalized_with_levels.pkl
-```
-
-#### 4. Erreur d'Environnement
-```bash
-# Recréer l'environnement
-rm -rf surgical_expertise_env/
+# Exécuter le script Python de configuration
 python setup_environment.py
 ```
 
-### Optimisations de Performance
+### 4️⃣ Configuration Manuelle (Alternative)
 
-#### Accélération GPU
-```python
-# Configuration GPU optimale (automatique dans le code)
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    tf.config.experimental.set_memory_growth(gpus[0], True)
+#### Étape 1 : Créer l'environnement virtuel
+```bash
+python -m venv surgical_expertise_env
 ```
 
-#### Réduction Mémoire
-- Réduire `batch_size` (500 → 256)
-- Réduire `sequence_length` (50 → 30)
-- Utiliser `mixed_precision` pour GPU modernes
+#### Étape 2 : Activer l'environnement
+```bash
+# Windows
+surgical_expertise_env\Scripts\activate
+
+# Linux/macOS  
+source surgical_expertise_env/bin/activate
+```
+
+#### Étape 3 : Installer les dépendances
+```bash
+pip install -r requirements.txt
+```
 
 ---
 
-## 📝 Contributions
+## 📊 Format des Données d'Entrée
 
-### Comment Contribuer
-1. **Fork** le projet
-2. Créer une **branche feature** (`git checkout -b feature/AmazingFeature`)
-3. **Commit** les changes (`git commit -m 'Add AmazingFeature'`)
-4. **Push** vers la branche (`git push origin feature/AmazingFeature`)
-5. Ouvrir une **Pull Request**
+### 🔗 Format JSON Attendu
 
-### Zones d'Amélioration
-- 🔬 **Nouveaux datasets** : Intégration de données supplémentaires
-- 🧠 **Architectures** : Test de nouveaux modèles (Vision Transformer, etc.)
-- ⚖️ **Équilibrage** : Techniques avancées pour classes rares
-- 🎯 **Métriques** : Métriques spécialisées pour domaine médical
-- 🚀 **Déploiement** : API REST, interface web, intégration clinique
+Le script attend un fichier JSON avec la structure suivante :
+
+```json
+{
+  "participant": {
+    "0": "1020614",
+    "1": "1020614", 
+    "2": "1020614"
+  },
+  "trial": {
+    "0": "Trial1",
+    "1": "Trial1",
+    "2": "Trial1"
+  },
+  "instrument": {
+    "0": "scissors",
+    "1": "grasper", 
+    "2": "drill"
+  },
+  "captured_time": {
+    "0": 24.749,
+    "1": 45.231,
+    "2": null
+  },
+  "inuse_time": {
+    "0": 67.04,
+    "1": 78.45,
+    "2": 120.5
+  },
+  "captured_frames": {
+    "0": 232.0,
+    "1": 425.0,
+    "2": null
+  },
+  "inuse_frames": {
+    "0": 631.0,
+    "1": 738.0,
+    "2": 1134.0
+  },
+  "fraction": {
+    "0": 0.3691676611,
+    "1": 0.5764332247,
+    "2": null
+  }
+}
+```
+
+### 📝 Description des Champs
+
+| Champ | Type | Description | Obligatoire |
+|-------|------|-------------|-------------|
+| `participant` | string | ID unique du participant | ✅ Oui |
+| `trial` | string | Nom/numéro du trial (ex: "Trial1", "Trial2") | ✅ Oui |
+| `instrument` | string | Type d'instrument ("scissors", "grasper", "drill") | ✅ Oui |
+| `captured_time` | float/null | Temps de capture en secondes | ❌ Non |
+| `inuse_time` | float/null | Temps d'utilisation en secondes | ❌ Non |
+| `captured_frames` | float/null | Nombre de frames capturées | ❌ Non |
+| `inuse_frames` | float/null | Nombre de frames d'utilisation | ❌ Non |
+| `fraction` | float/null | Ratio de détection (0-1) | ❌ Non |
+
+### ⚠️ Notes Importantes sur les Données
+- Les valeurs `null` sont automatiquement converties en `NaN`
+- Le script **ne calcule PAS** les fractions manquantes automatiquement
+- Les données manquantes sont préservées comme `NaN` pour maintenir l'authenticité
+- Format d'export pandas DataFrame vers JSON supporté
 
 ---
 
+## 🎮 Utilisation
 
-## 👥 Équipe de Développement
+### 🏃‍♂️ Lancement Rapide
 
-- **Recherche** : Équipe D3MIA
-- **Développement** : Spécialistes en IA médicale
-- **Validation** : Chirurgiens experts et résidents
+1. **Activer l'environnement virtuel :**
+```bash
+# Windows
+surgical_expertise_env\Scripts\activate
+
+# Linux/macOS
+source surgical_expertise_env/bin/activate
+```
+
+2. **Exécuter l'analyse :**
+```bash
+python analyze_missing_data.py --input data/missing_data.json --out_dir ./analyse_missing_data_result
+```
+
+### 🔧 Options de la Ligne de Commande
+
+```bash
+python analyze_missing_data.py [OPTIONS]
+
+Options:
+  --input PATH     Chemin vers le fichier JSON d'entrée 
+                   (défaut: data/missing_data.json)
+  
+  --out_dir PATH   Dossier de sortie pour les résultats
+                   (défaut: ./analyse_missing_data_result)
+  
+  --help          Afficher l'aide
+```
+
+### 📋 Exemples d'Utilisation
+
+#### Exemple 1 : Analyse Standard
+```bash
+python analyze_missing_data.py --input data/missing_data.json --out_dir ./results
+```
+
+#### Exemple 2 : Fichier Personnalisé
+```bash
+python analyze_missing_data.py --input /path/to/my_data.json --out_dir ./custom_analysis
+```
+
+#### Exemple 3 : Analyse avec Dossier Absolu
+```bash
+python analyze_missing_data.py --input "C:\Data\surgical_data.json" --out_dir "C:\Results\Analysis"
+```
 
 ---
 
-## 📚 Références Scientifiques
+## 📊 Résultats Générés
 
-### Articles Connexes
-- Transformer architectures in medical AI
-- LSTM for temporal surgical skill assessment
-- Multi-modal fusion for expertise prediction
-- Class imbalance in medical classification
+### 📁 Structure des Résultats
 
-### Technologies Utilisées
-- **Transformer** : Architecture attention-based
-- **LSTM/GRU** : Réseaux récurrents pour séquences
-- **CNN 1D** : Convolution pour patterns temporels
-- **Focal Loss** : Fonction de perte pour déséquilibre
+```
+📁 analyse_missing_data_result/
+├── 📊 missing_data_analysis_report.txt           # Rapport textuel complet
+├── 📊 worst_tracking_combinations.txt            # Rapport des pires cas
+├── 📄 worst_tracking_combinations.csv           # Export CSV des pires cas
+├── 📄 raw_data_export.csv                       # Export des données brutes
+├── 📈 fraction_distribution.png                 # Histogramme des fractions
+├── 📈 participant_analysis.png                  # Analyse par participant
+└── 📈 instrument_analysis.png                   # Analyse par instrument
+```
+
+### 📋 Contenu des Rapports
+
+#### 1️⃣ Rapport Textuel Principal
+- 📊 **Statistiques globales** : Nombre d'entrées, participants, trials, instruments
+- 📈 **Statistiques descriptives** : Moyennes, médianes, écarts-types
+- 👥 **Analyse par participant** : Performance moyenne par participant
+- 🔧 **Analyse par instrument** : Performance par type d'instrument
+- 🚨 **Cas problématiques** : Liste des cas avec fraction < 0.5
+
+#### 2️⃣ Rapport des Pires Cas
+- 🏆 **Classement descendant** : Combinaisons participant-trial-instrument les plus problématiques
+- 📊 **Métriques détaillées** : Toutes les valeurs pour chaque cas
+- 🚨 **Identification critique** : Focus sur les cas avec fraction = 0.0
+
+#### 3️⃣ Visualisations
+- **Distribution des fractions** : Histogramme montrant la répartition des performances
+- **Analyse par participant** : Graphique en barres des performances moyennes
+- **Analyse par instrument** : Comparaison des performances par type d'instrument
+
+### 📊 Métriques de Performance
+
+#### Seuils d'Évaluation
+- **🛠️ Excellent** : fraction ≥ 0.8 (tracking très fiable)
+- **🟡 Bon** : 0.5 ≤ fraction < 0.8 (tracking acceptable)  
+- **🔴 Problématique** : fraction < 0.5 (tracking insuffisant)
+- **❌ Critique** : fraction = 0.0 (aucune détection)
 
 ---
 
-## 🔗 Liens Utiles
+## 🐛 Dépannage et FAQ
 
-- **Repository** : [GitHub ICEMS](https://github.com/D3MIA/ICEMS)
-- **TensorFlow** : [Documentation officielle](https://tensorflow.org/)
-- **Jupyter** : [Guide d'installation](https://jupyter.org/install)
-- **Guides Deep Learning** : [Keras Documentation](https://keras.io/)
+### ❓ Problèmes Courants
+
+#### 1. Erreur "FileNotFoundError"
+```
+❌ Erreur: FileNotFoundError: [Errno 2] No such file or directory: 'data/missing_data.json'
+```
+**Solution :** Vérifiez que le fichier existe et que le chemin est correct.
+
+#### 2. Erreur "ModuleNotFoundError" 
+```
+❌ Erreur: ModuleNotFoundError: No module named 'pandas'
+```
+**Solution :** Activez l'environnement virtuel et installez les dépendances :
+```bash
+surgical_expertise_env\Scripts\activate
+pip install -r requirements.txt
+```
+
+#### 3. Erreur de Format JSON
+```
+❌ Erreur: JSONDecodeError: Expecting ',' delimiter
+```
+**Solution :** Vérifiez la structure JSON avec un validateur en ligne.
+
+#### 4. Données Vides
+```
+⚠️ Aucune donnée valide trouvée après parsing
+```
+**Solution :** Vérifiez que votre JSON contient les champs `participant`, `trial`, et `instrument`.
+
+### 🔧 Options de Debug
+
+Pour activer les logs détaillés, modifiez la ligne suivante dans le script :
+```python
+# Ligne ~70 dans analyze_missing_data.py
+DEBUG = True  # Changer False en True
+```
 
 ---
+
+## 🔬 Détails Techniques
+
+### 🏗️ Architecture du Code
+
+```python
+# Structure principale du script
+AdvancedSurgicalDataProcessor
+├── load_missing_data()           # Chargement des données JSON
+├── parse_entry()                 # Parsing et validation d'une entrée
+├── safe_float() / safe_int()     # Conversion sécurisée des types
+├── plot_fraction_distribution()  # Génération des graphiques
+├── analyze_participants()        # Analyse par participant
+├── analyze_instruments()         # Analyse par instrument
+└── generate_worst_cases_report() # Génération du classement
+```
+
+### 🔄 Flux de Traitement
+
+1. **📂 Chargement** : Lecture et parsing du JSON
+2. **✅ Validation** : Vérification de la structure des données
+3. **🔧 Parsing** : Extraction et conversion des valeurs
+4. **📊 Analysis** : Calcul des statistiques et métriques
+5. **📈 Visualisation** : Génération des graphiques
+6. **📝 Rapport** : Création des rapports textuels
+7. **💾 Export** : Sauvegarde des résultats
+
+### ⚡ Optimisations
+
+- **🚀 Gestion mémoire** : Traitement par chunks pour gros datasets
+- **🛡️ Robustesse** : Gestion d'erreurs complète avec try/catch
+- **📊 Performance** : Utilisation de NumPy pour les calculs vectorisés
+- **🎨 Visualisations** : Matplotlib optimisé avec styles personnalisés
+
+---
+
+## 📝 Contributions et Support
+
+### 🤝 Comment Contribuer
+1. **Fork** le repository
+2. **Créez** une branche pour votre fonctionnalité (`git checkout -b feature/ma-fonctionnalite`)
+3. **Commitez** vos changements (`git commit -am 'Ajout de ma fonctionnalité'`)
+4. **Pushez** vers la branche (`git push origin feature/ma-fonctionnalite`)
+5. **Créez** une Pull Request
+
+### 📋 Standards de Code
+- **🐍 PEP 8** : Style de code Python
+- **📝 Documentation** : Docstrings pour toutes les fonctions
+- **🧪 Tests** : Tests unitaires pour les nouvelles fonctionnalités
+- **🔧 Type Hints** : Annotations de type recommandées
+
+### 📞 Support
+
+Pour signaler un bug ou demander une fonctionnalité :
+1. Vérifiez la section Dépannage ci-dessus
+2. Consultez les logs d'erreur complets
+3. Préparez un exemple de données qui pose problème
+4. Créez une issue sur le repository Git
+
+---
+
+## 📜 Licence
+
+Ce projet est sous licence MIT. Voir le fichier `LICENSE` pour plus de détails.
+
+---
+
+*🏥 Développé pour l'analyse de simulation neurochirurgicale - Université/Institution*
 

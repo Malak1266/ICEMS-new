@@ -168,8 +168,10 @@ def clean_trial_CxT(data_CxT: np.ndarray) -> np.ndarray:
         m = np.mean(y); s = np.std(y) + 1e-6
         y = np.clip(y, m - CLIP_SIGMA*s, m + CLIP_SIGMA*s)
         Y[c] = y
+    print(rz)
     # 2) z-score par canal (trial)
-    m = Y.mean(axis=1, keepdims=True); s = Y.std(axis=1, keepdims=True) + 1e-6
+    m = Y.mean(axis=1, keepdims=True); 
+    s = Y.std(axis=1, keepdims=True) + 1e-6
     Y = (Y - m) / s
     return Y
 

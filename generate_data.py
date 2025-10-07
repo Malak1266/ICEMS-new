@@ -1,67 +1,74 @@
-"""full_data.json (dict-of-dicts) -> dataset format A (list-of-dicts), VERSION LOGIQUE OPTIMISEE
-BASED ON LOGICAL BEHAVIOR ANALYSIS:
-- Focus on LOGICAL metrics: Velocity (score=0.9, best), Position (score=0.7, stable), Acceleration (informative)
-- Distance Bipolar: 0% zeros, good discriminative power
-- Remove Jerk (illogical behavior - increases with expertise instead of decreasing)
-- Smart interpolation for captured_flag=False instead of zero-fill
-- Split by trials to avoid data leakage
-- Labels: Expertise (4 classes) + Level (9 classes)
+# -*- coding: utf-8 -*-
+"""
+Generate dataset (Format A: list[dict]) from full_data.json for ICEMS.
+
+What it does (aligned with user's spec):
+- Includes ALL metrics present in the original streams that we need:
+  * X, Y, Z Position (from "position")
+  * Position Magnitude (derived)
+  * Velocity, Acceleration, Jerk (read if present; otherwise computed from position)
+  * Distance Bipolar–Cavitron, Distance Bipolar–Scissors (when available)
+- Uses ONLY the captured flags to filter/mask the data:
+  * For single-instrument metrics (pos/vel/acc/jerk): captured_flag
+  * For bimanual metrics (distances): bidist_captured_flag (fallback to captured_flag)
+- Preserves time alignment (10 Hz) and keeps constant length series by zeroing values where flags=False.
+  (We then drop windows with >=50% zeros later during training, as requested.)
+- Adds two label rows: Label(Expertise) and Label(Level) (per time-step, constant across a trial).
 
 Outputs:
-- PKL list[dict] with optimized metrics
-- META json with quality statistics
-full_data.json (dict-of-dicts) -> dataset format A (list-of-dicts), VERSION RÉDUITE
-- Conserve uniquement: X, Y, Z, Position Magnitude, Distance Bipolar–Cavitron, Distance Bipolar–Scissors
-- Mono-instrument: utilise captured_flag pour zero-fill (PAS de prune, on ne supprime rien)
-- Bimanuel: lecture directe depuis 'distance', masque par bidist_captured_flag (fallback: captured_flag), zero-fill (PAS de prune)
-- Ajout d'une 2e ligne de label: Level (row 1)
-- Retire tout le reste (vitesse, accélération, jerk, etc.)
-- IMPORTANT: AUCUNE suppression d'échantillon: on garde la longueur alignée, on remplit à 0 là où mask=False
+- PKL file: list of dict entries:
+    {
+      "name": "<participant>_<trial>_<instrument>",
+      "participant": "<id>",
+      "trial": "<trial>",
+      "instrument": "<instrument>",
+      "expertise": "<str>",
+      "level": "<str>",
+      "expertise_idx": <int>,
+      "level_idx": <int>,
+      "data": [[... rows ...] x T]
+    }
+- META json file with metric_names (row order) and label maps.
 
-Sorties:
-- PKL list[dict]
-- META json (noms de lignes, mapping expertise->label, level->label)
+Usage:
+    python generate_data.py \
+        --full_json /path/to/full_data.json \
+        --out_pkl   /path/to/final_from_full_A.pkl
+
+Defaults are reasonable for running inside this repo.
 """
 
 import os
 import json
 import pickle
+import argparse
 import numpy as np
 from collections import defaultdict
 
-# ========= chemins =========
-FULL_JSON = r"c:\Users\boudr\OneDrive\Documents\last_version\data\full_data.json"  # <— adapte
-OUT_PKL   = r"c:\Users\boudr\OneDrive\Documents\last_version\01_10_2025\data\final_from_full_A_positions_and_dists.pkl"
-OUT_META  = os.path.splitext(OUT_PKL)[0] + "_meta.json"
+SAMPLE_RATE_HZ = 10.0
+DEFAULT_DT = 1.0 / SAMPLE_RATE_HZ
 
-# ========= paramètres temporels (10 Hz, seulement indicatif) =========
-SAMPLE_RATE_HZ       = 10.0
-DEFAULT_DT           = 1.0 / SAMPLE_RATE_HZ   # 0.1 s
-
-RNG = np.random.default_rng(42)
-
-# ========= utils =========
+# --------------------- small utils ---------------------
 def _as_bool(x):
     a = np.asarray(x)
-    if a.dtype == bool:
-        return a
-    return (np.asarray(x) != 0)
+    return a.astype(bool) if a.dtype != bool else a
 
 def _as_1d(x, dtype=float):
     a = np.asarray(x, dtype=dtype)
     if a.ndim != 1:
-        raise ValueError(f"Attendu 1D, reçu shape={a.shape}")
+        raise ValueError(f"expected 1D, got shape={a.shape}")
     return a
 
 def _as_3xn(mat):
     A = np.asarray(mat, dtype=float)
     if A.ndim != 2:
-        raise ValueError("mat doit être 2D")
+        raise ValueError("position must be 2D")
+    # accept (N,3) or (3,N)
     if A.shape[1] == 3:   # (N,3)
         return A.T
     if A.shape[0] == 3:   # (3,N)
         return A
-    raise ValueError(f"Forme non 3D: {A.shape}")
+    raise ValueError(f"position not 3D compatible: {A.shape}")
 
 def _align_min_len(arrs):
     lens = [len(x) for x in arrs if x is not None and len(x) > 0]
@@ -76,62 +83,12 @@ def _align_min_len(arrs):
             out.append(x[:N])
     return out, N
 
-def _mag3(M3xN):
-    return np.sqrt(np.sum(M3xN[:3]**2, axis=0))
-
 def _get_dt(t):
     if t is None or len(t) < 2:
         return DEFAULT_DT
     d = np.diff(np.asarray(t, dtype=float))
     d = d[np.isfinite(d) & (d > 0)]
     return float(np.mean(d)) if len(d) else DEFAULT_DT
-
-def _smart_fill_with_mask(arr, mask, method='interpolate'):
-    """
-    arr: ndarray shape (N,) ou (N,3) ou (3,N)
-    mask: bool array shape (N,)
-    Remplace les points non capturés (mask=False) par interpolation ou moyenne.
-    """
-    if arr is None:
-        return None
-    a = np.asarray(arr, dtype=float).copy()
-    m = np.asarray(mask, dtype=bool)
-    
-    if a.ndim == 1:
-        missing = ~m
-        if missing.any():
-            if method == 'interpolate' and m.sum() >= 2:  # Au moins 2 points valides
-                valid_indices = np.where(m)[0]
-                valid_values = a[m]
-                a[missing] = np.interp(np.where(missing)[0], valid_indices, valid_values)
-            else:
-                # Fallback: moyenne des valeurs valides
-                valid_mean = np.mean(a[m]) if m.sum() > 0 else 0.0
-                a[missing] = valid_mean
-    elif a.ndim == 2:
-        if a.shape[0] == 3:   # (3, N)
-            for i in range(3):
-                missing = ~m
-                if missing.any():
-                    if method == 'interpolate' and m.sum() >= 2:
-                        valid_indices = np.where(m)[0]
-                        valid_values = a[i, m]
-                        a[i, missing] = np.interp(np.where(missing)[0], valid_indices, valid_values)
-                    else:
-                        valid_mean = np.mean(a[i, m]) if m.sum() > 0 else 0.0
-                        a[i, missing] = valid_mean
-        elif a.shape[1] == 3:   # (N, 3)
-            for i in range(3):
-                missing = ~m
-                if missing.any():
-                    if method == 'interpolate' and m.sum() >= 2:
-                        valid_indices = np.where(m)[0]
-                        valid_values = a[m, i]
-                        a[missing, i] = np.interp(np.where(missing)[0], valid_indices, valid_values)
-                    else:
-                        valid_mean = np.mean(a[m, i]) if m.sum() > 0 else 0.0
-                        a[missing, i] = valid_mean
-    return a
 
 def _take_first_or_none(lst):
     if lst is None:
@@ -140,15 +97,13 @@ def _take_first_or_none(lst):
         return lst[0]
     return lst
 
-def _get_bundle_fields(bundle, name):
-    """Retourne première occurrence du metric 'name' si multiples."""
+def _get_bundle_field(bundle, name):
     arrs = bundle.get(name, None)
     if arrs is None:
         return None
     return _take_first_or_none(arrs)
 
 def _fit_to_length(x, L):
-    """Tronque/pad un vecteur 1D à la longueur L (pad=0)."""
     if x is None:
         return None
     x = np.asarray(x, dtype=float)
@@ -159,263 +114,261 @@ def _fit_to_length(x, L):
     return out
 
 def _fit_mask_to_length(m, L):
-    """Tronque/pad un masque bool à la longueur L (pad=False)."""
     if m is None:
         return None
     m = np.asarray(m, dtype=bool)
     if len(m) >= L:
         return m[:L]
     out = np.zeros(L, dtype=bool)
-    out[:len(m)] = m
+    out[:len(m)] = m[:len(m)]
     return out
 
-# ========= lecture =========
-print("🔄 Lecture full_data…")
-with open(FULL_JSON, "r", encoding="utf-8") as f:
-    D = json.load(f)
+def _mag3(M3xN):
+    return np.sqrt(np.sum(M3xN[:3]**2, axis=0))
 
-req = ["participant","trial","instrument","metric","data","len","expertise","level"]
-for k in req:
-    if k not in D:
-        raise KeyError(f"Clé manquante dans full_data: {k}")
+def _central_diff(x, dt):
+    # central differences with forward/backward at ends
+    x = np.asarray(x, dtype=float)
+    v = np.zeros_like(x)
+    if len(x) >= 3:
+        v[1:-1] = (x[2:] - x[:-2]) / (2.0*dt)
+        v[0]    = (x[1] - x[0]) / dt
+        v[-1]   = (x[-1] - x[-2]) / dt
+    elif len(x) == 2:
+        v[0]  = (x[1]-x[0])/dt
+        v[1]  = v[0]
+    return v
 
-ids = list(D["data"].keys())
-print(f"Total entrées: {len(ids)}")
+def _derive_speed_from_pos(P3xN, dt):
+    # 3D velocity magnitude, acceleration magnitude, jerk magnitude
+    x,y,z = P3xN[0], P3xN[1], P3xN[2]
+    vx = _central_diff(x, dt); vy = _central_diff(y, dt); vz = _central_diff(z, dt)
+    vmag = np.sqrt(vx*vx + vy*vy + vz*vz)
+    ax = _central_diff(vx, dt); ay = _central_diff(vy, dt); az = _central_diff(vz, dt)
+    amag = np.sqrt(ax*ax + ay*ay + az*az)
+    jx = _central_diff(ax, dt); jy = _central_diff(ay, dt); jz = _central_diff(az, dt)
+    jmag = np.sqrt(jx*jx + jy*jy + jz*jz)
+    return vmag, amag, jmag
 
-# index par (pid, trial, instrument)
-by_combo = defaultdict(dict)
-meta_combo = {}
-for i in ids:
-    pid  = D["participant"][i]
-    tr   = D["trial"][i]
-    inst = D["instrument"][i]
-    met  = D["metric"][i]
-    arr  = D["data"][i]
-    key  = (pid, tr, inst)
+# --------------------- core build ---------------------
+def build_dataset(full_json, out_pkl, out_meta):
+    print(f"🔄 Loading: {full_json}")
+    with open(full_json, "r", encoding="utf-8") as f:
+        D = json.load(f)
 
-    # conversions
-    if met in ("timestamp","captured_flag","bidist_captured_flag","tracking_flag","inuse_flag"):
-        val = np.asarray(arr)
-    else:
-        val = np.asarray(arr, dtype=float)
+    req = ["participant","trial","instrument","metric","data","expertise","level"]
+    for k in req:
+        if k not in D:
+            raise KeyError(f"Missing key in full_data: {k}")
 
-    by_combo[key].setdefault(met, []).append(val)
+    ids = list(D["data"].keys())
+    by_combo = defaultdict(dict)  # (pid,trial,instrument) -> metrics dict name->[arr,...]
+    labels_by_combo = {}
 
-    # labels nettoyés (strip) pour éviter espaces traînants
-    exp_str = (D["expertise"][i] or "").strip()
-    lvl_str = (D["level"][i]     or "").strip()
-    meta_combo[key] = (exp_str, lvl_str)
+    for i in ids:
+        pid  = D["participant"][i]
+        tr   = D["trial"][i]
+        inst = D["instrument"][i]
+        met  = D["metric"][i]
+        arr  = D["data"][i]
+        key  = (str(pid), str(tr), str(inst))
 
-# regroupe par (pid, trial) pour croiser les instruments
-by_pt = defaultdict(dict)
-for (pid,tr,inst), bundle in by_combo.items():
-    by_pt[(pid,tr)][inst] = bundle
+        labels_by_combo[key] = ((D["expertise"][i] or "").strip(),
+                                (D["level"][i] or "").strip())
 
-# mappings labels (après strip)
-all_exp = sorted({meta_combo[k][0] for k in meta_combo})
-all_lvl = sorted({meta_combo[k][1] for k in meta_combo})
-label_map_expertise = {e:i for i,e in enumerate(all_exp)}
-label_map_level     = {e:i for i,e in enumerate(all_lvl)}
-print("🧭 mapping expertise->label:", label_map_expertise)
-print("🧭 mapping level->label    :", label_map_level)
+        by_combo[key].setdefault(met, []).append(arr)
 
-# ========= build =========
-entries = []
-kept = skipped = 0
+    # prepare label maps
+    all_exp = sorted({labels_by_combo[k][0] for k in labels_by_combo})
+    all_lvl = sorted({labels_by_combo[k][1] for k in labels_by_combo})
+    label_map_expertise = {e:i for i,e in enumerate(all_exp)}
+    label_map_level     = {e:i for i,e in enumerate(all_lvl)}
+    print("🧭 expertise map:", label_map_expertise)
+    print("🧭 level map    :", label_map_level)
 
-for (pid,tr), inst_map in by_pt.items():
-    for inst, B in inst_map.items():
-        exp_str, lvl_str = meta_combo[(pid,tr,inst)]
-        y_exp = label_map_expertise.get(exp_str, 0)
-        y_lvl = label_map_level.get(lvl_str, 0)
+    # index by (pid,trial) across instruments
+    by_pt = defaultdict(dict)
+    for (pid,tr,inst), bundle in by_combo.items():
+        by_pt[(pid,tr)][inst] = bundle
 
-        # ---- requis: timestamp/position/captured_flag ----
-        Ts  = _get_bundle_fields(B, "timestamp")
-        Pos = _get_bundle_fields(B, "position")
-        Cap = _get_bundle_fields(B, "captured_flag")
-        if Ts is None or Pos is None or Cap is None:
-            skipped += 1
-            continue
+    entries = []
+    kept = skipped = 0
 
-        try:
-            Ts  = _as_1d(Ts)
-            P3  = _as_3xn(Pos)       # (3, Npos)
-            Cap = _as_bool(Cap)      # (Ncap,)
-        except Exception:
-            skipped += 1
-            continue
+    for (pid,tr), inst_map in by_pt.items():
+        for inst, B in inst_map.items():
+            exp_str, lvl_str = labels_by_combo[(pid,tr,inst)]
+            y_exp = label_map_expertise.get(exp_str, 0)
+            y_lvl = label_map_level.get(lvl_str, 0)
 
-        # ---------- align SANS supprimer (pas de prune) ----------
-        # On aligne par MIN longueur entre Ts, Pos.T, Cap, pour avoir un N commun,
-        # puis on remet à 0 où Cap=False (zero-fill), sans enlever d'indices.
-        arrs = [Ts, P3.T, Cap]
-        arrs, N = _align_min_len(arrs)
-        if N == 0:
-            skipped += 1
-            continue
+            Ts   = _get_bundle_field(B, "timestamp")
+            Pos  = _get_bundle_field(B, "position")
+            Cap  = _get_bundle_field(B, "captured_flag")    # mono-mask
+            if Ts is None or Pos is None or Cap is None:
+                skipped += 1
+                continue
 
-        k = 0
-        Ts   = arrs[k]; k += 1        # (N,)
-        Pn3  = arrs[k]; k += 1        # (N,3)
-        Cap0 = _as_bool(arrs[k]); k += 1  # (N,)
+            try:
+                Ts  = _as_1d(Ts, dtype=float)
+                P3  = _as_3xn(Pos)      # (3,N)
+                Cap = _as_bool(Cap)     # (N,)
+            except Exception:
+                skipped += 1
+                continue
 
-        # Position magnitude réintégrée (analyse logique: score=0.7, stable + consistante)
-        pos_mag = _mag3(P3)  # magnitude 3D position
-        pos_mag = pos_mag[:N]  # align to common length
-        pos_mag = _smart_fill_with_mask(pos_mag, Cap0, method='interpolate')
+            # align to common length for mono-instrument channels
+            arrs, Nmono = _align_min_len([Ts, P3.T, Cap])
+            if Nmono == 0:
+                skipped += 1; continue
+            Ts   = arrs[0]
+            Pn3  = arrs[1]            # (N,3) aligned
+            Cap0 = _as_bool(arrs[2])  # (N,)
 
-        # ---------- distances bimanuel (zero-fill via bidist_captured_flag / captured_flag) ----------
-        def _read_distance_and_mask(bundle):
-            dist = _get_bundle_fields(bundle, "distance")
-            if dist is None:
-                return None, None
-            dist = _as_1d(dist, dtype=float)
+            P3 = Pn3.T                # back to (3,N)
+            dt = _get_dt(Ts)
 
-            bid = _get_bundle_fields(bundle, "bidist_captured_flag")
-            cap = _get_bundle_fields(bundle, "captured_flag")
-            if bid is not None:
-                mask = _as_bool(bid)
-            elif cap is not None:
-                mask = _as_bool(cap)
+            # X,Y,Z (masked by captured_flag -> zeros outside capture)
+            Xp = P3[0]; Yp = P3[1]; Zp = P3[2]
+            pos_mag = _mag3(P3)
+            Xp = np.where(Cap0, Xp[:Nmono], 0.0)
+            Yp = np.where(Cap0, Yp[:Nmono], 0.0)
+            Zp = np.where(Cap0, Zp[:Nmono], 0.0)
+            pos_mag = np.where(Cap0, pos_mag[:Nmono], 0.0)
+
+            # Velocity/Acceleration/Jerk: prefer streams if present, else derive
+            vel_stream  = _get_bundle_field(B, "velocity")
+            acc_stream  = _get_bundle_field(B, "acceleration")
+            jerk_stream = _get_bundle_field(B, "jerk")
+
+            if vel_stream is not None and acc_stream is not None and jerk_stream is not None:
+                vel  = _fit_to_length(_as_1d(vel_stream, dtype=float), Nmono)
+                acc  = _fit_to_length(_as_1d(acc_stream, dtype=float), Nmono)
+                jerk = _fit_to_length(_as_1d(jerk_stream, dtype=float), Nmono)
             else:
-                mask = np.ones_like(dist, dtype=bool)
-            aligned, NN = _align_min_len([dist, mask])
-            if NN == 0:
-                return None, None
-            return aligned[0], _as_bool(aligned[1])
+                vmag, amag, jmag = _derive_speed_from_pos(P3, dt)
+                vel  = _fit_to_length(vmag, Nmono)
+                acc  = _fit_to_length(amag, Nmono)
+                jerk = _fit_to_length(jmag, Nmono)
 
-        def _dist_for_inst(inst_name):
-            b = inst_map.get(inst_name, None)
-            if b is None:
-                return None, None
-            return _read_distance_and_mask(b)
+            vel  = np.where(Cap0, vel, 0.0)
+            acc  = np.where(Cap0, acc, 0.0)
+            jerk = np.where(Cap0, jerk, 0.0)
 
-        def _pair_distance(a, b):
-            da, ma = _dist_for_inst(a)
-            db, mb = _dist_for_inst(b)
-            na = int(ma.sum()) if ma is not None else 0
-            nb = int(mb.sum()) if mb is not None else 0
-            # Choisir la meilleure source disponible (plus de points "True")
-            if na >= nb and da is not None:
-                return da, ma
-            if db is not None:
-                return db, mb
-            return None, None
+            # Bimanual distances (choose best available instrument bundle and mask with bidist flag)
+            def _read_dist(inst_name):
+                b = inst_map.get(inst_name, None)
+                if b is None: return None, None
+                dist = _get_bundle_field(b, "distance")
+                if dist is None: return None, None
+                bid  = _get_bundle_field(b, "bidist_captured_flag")
+                capb = _get_bundle_field(b, "captured_flag")
+                mask = bid if bid is not None else capb
+                if mask is None: return None, None
+                dist = _as_1d(dist, dtype=float)
+                mask = _as_bool(mask)
+                aligned, NN = _align_min_len([dist, mask])
+                if NN == 0: return None, None
+                dist_al = aligned[0]; m_al = _as_bool(aligned[1])
+                return dist_al, m_al
 
-        # On aligne les distances sur la longueur N et on zero-fill selon leur propre mask
-        Nfinal = len(Ts)
+            def _pair(a,b):
+                da,ma = _read_dist(a)
+                db,mb = _read_dist(b)
+                na = int(ma.sum()) if ma is not None else 0
+                nb = int(mb.sum()) if mb is not None else 0
+                if na >= nb and da is not None: return da,ma
+                if db is not None: return db,mb
+                return None,None
 
-        dist_bip_cav, mask_bip_cav = _pair_distance("bipolar", "cavitron")
-        if dist_bip_cav is not None:
-            dist_bip_cav = _fit_to_length(dist_bip_cav, Nfinal)
-            mask_bip_cav = np.ones_like(dist_bip_cav, dtype=bool) if mask_bip_cav is None else _fit_mask_to_length(mask_bip_cav, Nfinal)
-            dist_bip_cav = _smart_fill_with_mask(dist_bip_cav, mask_bip_cav, method='interpolate')
-        else:
-            dist_bip_cav = np.zeros(Nfinal, dtype=float)
+            dist_bip_cav, mask_bc = _pair("bipolar","cavitron")
+            dist_bip_sci, mask_bs = _pair("bipolar","scissors")
 
-        dist_bip_sci, mask_bip_sci = _pair_distance("bipolar", "scissors")
-        if dist_bip_sci is not None:
-            dist_bip_sci = _fit_to_length(dist_bip_sci, Nfinal)
-            mask_bip_sci = np.ones_like(dist_bip_sci, dtype=bool) if mask_bip_sci is None else _fit_mask_to_length(mask_bip_sci, Nfinal)
-            dist_bip_sci = _smart_fill_with_mask(dist_bip_sci, mask_bip_sci, method='interpolate')
-        else:
-            dist_bip_sci = np.zeros(Nfinal, dtype=float)
+            # align distances to Nmono and zero outside their own masks
+            if dist_bip_cav is not None:
+                dist_bip_cav = _fit_to_length(dist_bip_cav, Nmono)
+                mask_bc = np.ones_like(dist_bip_cav, bool) if mask_bc is None else _fit_mask_to_length(mask_bc, Nmono)
+                dist_bip_cav = np.where(mask_bc, dist_bip_cav, 0.0)
+            else:
+                dist_bip_cav = np.zeros(Nmono, dtype=float)
 
-        # ---------- récupération vélocité, accélération, jerk depuis full_data ----------
-        vel = _get_bundle_fields(B, "velocity")
-        acc = _get_bundle_fields(B, "acceleration")
-        jerk = _get_bundle_fields(B, "jerk")
+            if dist_bip_sci is not None:
+                dist_bip_sci = _fit_to_length(dist_bip_sci, Nmono)
+                mask_bs = np.ones_like(dist_bip_sci, bool) if mask_bs is None else _fit_mask_to_length(mask_bs, Nmono)
+                dist_bip_sci = np.where(mask_bs, dist_bip_sci, 0.0)
+            else:
+                dist_bip_sci = np.zeros(Nmono, dtype=float)
 
-        # METRIQUES OPTIMISEES basees sur l'analyse logique comportementale
-        
-        # Velocity: Score logique 0.9 - EXCELLENTE métrique (diminue avec expertise + plus consistante)
-        if vel is not None:
-            vel = _as_1d(vel, dtype=float)
-            vel = _fit_to_length(vel, Nfinal)
-            vel = _smart_fill_with_mask(vel, Cap0, method='interpolate')
-        else:
-            vel = np.zeros(Nfinal, dtype=float)
-            
-        # Acceleration: Score 0.2 - Variable mais peut contenir signal utile pour mouvements contrôlés
-        if acc is not None:
-            acc = _as_1d(acc, dtype=float)
-            acc = _fit_to_length(acc, Nfinal)
-            # Accélération très variable, on utilise interpolation douce
-            acc = _smart_fill_with_mask(acc, Cap0, method='interpolate')
-        else:
-            acc = np.zeros(Nfinal, dtype=float)
-            
-        # Jerk SUPPRIME (analyse logique: comportement illogique - augmente chez experts au lieu de diminuer)
+            # Assemble rows in final order
+            rows = [
+                Xp, Yp, Zp,            # 0..2
+                pos_mag,               # 3
+                vel, acc, jerk,        # 4..6
+                dist_bip_cav,          # 7
+                dist_bip_sci,          # 8
+            ]
 
-        # ---------- assemblage optimisé (focus métriques logiques) ----------
-        # Labels + métriques avec comportement logique selon expertise
-        rows = [
-            dist_bip_cav,      # Distance Bipolar-Cavitron (CV=0.142, 0% zeros, discriminative)
-            dist_bip_sci,      # Distance Bipolar-Scissors (CV=0.142, 0% zeros, discriminative)
-            pos_mag,           # Position Magnitude (score=0.7, stable+consistante, logique)
-            vel,               # Velocity (score=0.9, EXCELLENTE - diminue+consistante avec expertise)
-            acc,               # Acceleration (informative pour contrôle moteur)
-        ]
-        
-        # Statistiques de qualité pour debugging
-        quality_stats = {
-            'dist_bip_cav_zeros': float(np.sum(dist_bip_cav == 0) / len(dist_bip_cav)),
-            'dist_bip_sci_zeros': float(np.sum(dist_bip_sci == 0) / len(dist_bip_sci)),
-            'pos_mag_zeros': float(np.sum(pos_mag == 0) / len(pos_mag)),
-            'vel_zeros': float(np.sum(vel == 0) / len(vel)),
-            'acc_zeros': float(np.sum(acc == 0) / len(acc)),
-        }
+            T = Nmono
+            label_row_exp = np.full(T, int(y_exp), dtype=float)
+            label_row_lvl = np.full(T, int(y_lvl), dtype=float)
+            M = np.vstack([label_row_exp, label_row_lvl] + [np.asarray(r, dtype=float) for r in rows])
 
-        T_final = Nfinal
-        candidate_rows = [np.asarray(r[:T_final], dtype=float) for r in rows]
+            entry = {
+                "name": f"{pid}_{tr}_{inst}",
+                "participant": pid,
+                "trial": tr,
+                "instrument": inst,
+                "expertise": exp_str,
+                "level": lvl_str,
+                "expertise_idx": int(y_exp),
+                "level_idx": int(y_lvl),
+                "data": M.tolist()
+            }
+            entries.append(entry); kept += 1
 
-        # 2 lignes de labels
-        label_row_exp = np.full(T_final, int(y_exp), dtype=float)
-        label_row_lvl = np.full(T_final, int(y_lvl), dtype=float)
+    print(f"✅ Built entries: {kept}  |  Skipped (missing critical streams): {skipped}")
 
-        M = np.vstack([label_row_exp, label_row_lvl] + candidate_rows)
+    # save
+    os.makedirs(os.path.dirname(out_pkl), exist_ok=True)
+    with open(out_pkl, "wb") as f:
+        pickle.dump(entries, f)
+    print(f"[OK] PKL → {out_pkl}")
 
-        entry = {
-            "name": f"{pid}_{tr}_{inst}",
-            "participant": pid,
-            "trial": tr,
-            "instrument": inst,
-            "expertise": exp_str,
-            "level": lvl_str,
-            "expertise_idx": int(y_exp),
-            "level_idx": int(y_lvl),
-            "data": M.tolist()
-        }
-        entries.append(entry)
-        kept += 1
-
-print(f"✅ Construit: {kept} | Ignorés (manques critiques): {skipped}")
-
-# ========= sauvegardes =========
-os.makedirs(os.path.dirname(OUT_PKL), exist_ok=True)
-with open(OUT_PKL, "wb") as f:
-    pickle.dump(entries, f)
-print(f"[OK] PKL → {OUT_PKL}")
-
-feature_names = [
-    "Label(Expertise)",              # row 0 - 4 classes (Student/Junior/Senior/Expert)
-    "Label(Level)",                  # row 1 - 9 classes détaillées
-    "Distance Bipolar–Cavitron",     # row 2 - Discriminative (CV=0.142, 0% zeros)
-    "Distance Bipolar–Scissors",     # row 3 - Discriminative (CV=0.142, 0% zeros)
-    "Position Magnitude",            # row 4 - Logical behavior (score=0.7, stable+consistent)
-    "Velocity",                      # row 5 - EXCELLENT logical behavior (score=0.9)
-    "Acceleration",                  # row 6 - Motor control information
-]
-
-with open(OUT_META, "w", encoding="utf-8") as f:
-    json.dump({
-        "metric_names": feature_names,
+    # meta
+    metric_names = [
+        "Label(Expertise)",
+        "Label(Level)",
+        "X Position",
+        "Y Position",
+        "Z Position",
+        "Position Magnitude",
+        "Velocity",
+        "Acceleration",
+        "Jerk",
+        "Distance Bipolar–Cavitron",
+        "Distance Bipolar–Scissors",
+    ]
+    meta = {
+        "metric_names": metric_names,
         "label_map_expertise": label_map_expertise,
         "label_map_level": label_map_level,
-        "sample_rate_hz": SAMPLE_RATE_HZ,
-        "flags_used": {
-            "mono": "captured_flag (zero-fill False, aucune suppression)",
-            "bimanual": "bidist_captured_flag (fallback captured_flag) + zero-fill, aucune suppression"
-        }
-    }, f, ensure_ascii=False, indent=2)
-print(f"[OK] META → {OUT_META}")
+        "flags_policy": {
+            "single_instrument": "captured_flag used to mask (zeros when False)",
+            "bimanual_distance": "bidist_captured_flag (fallback captured_flag) used to mask (zeros when False)",
+            "note": "We do NOT use 'inuse' or 'tracking' for filtering, per spec."
+        },
+        "sample_rate_hz": SAMPLE_RATE_HZ
+    }
+    with open(out_meta, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    print(f"[OK] META → {out_meta}")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--full_json", type=str, default="data/full_data.json")
+    ap.add_argument("--out_pkl",   type=str, default=os.path.join(".", "data", "final_from_full_A.pkl"))
+    args = ap.parse_args()
+
+    out_meta = os.path.splitext(args.out_pkl)[0] + "_meta.json"
+    build_dataset(args.full_json, args.out_pkl, out_meta)
+
+if __name__ == "__main__":
+    main()
