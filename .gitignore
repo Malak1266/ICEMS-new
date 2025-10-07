@@ -15,6 +15,7 @@ data/missing_data.json
 
 # Résultats d'analyse
 analyse_missing_data_result/
+runs_cv_by_trials_fullmetrics/
 *.csv
 *.png
 
