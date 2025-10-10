@@ -1,47 +1,36 @@
 # -*- coding: utf-8 -*-
 """
-CV 5-fold by TRIALS — LSTM+Transformer — Full metrics — Train-only normalization — Test holdout
+Leave-One-Trial-Out (LOOCV) — LSTM+Transformer — Full metrics — Train-only normalization
 
-Key points (per user spec):
-- Windows: L=100, hop=100 (10s @ 10Hz), remove windows with >=50% zeros (raw pre-clean)
-- Use ALL metrics produced by generate_data.py (X,Y,Z, PosMag, Velocity, Acceleration, Jerk, Distances)
-- CV split by TRIALS (Group = trial id) so train/val never share the same trial
-- Ensure level coverage in train via StratifiedKFold on trials (using the most frequent level of each trial)
-- Normalization: compute mean/std on TRAIN ONLY, then apply to VAL and TEST
-- Final holdout TEST set: ~15% of trials completely unseen during CV; final model trained on remaining trials
-- Outputs:
-    * pred_windows_oof.csv (fold, participant, trial, start, true label 9, pred label 9, probs per class)
-    * confusion_windows_oof.png  (windows OOF)
-    * confusion_participants_oof.png (heatmap: participants × predicted classes counts)
-    * confusion_participants_majority_oof.png (participants aggregated by majority to 9-level)
-    * test_pred_windows.csv, test_pred_participants.csv
-    * confusion_windows_test.png, confusion_participants_majority_test.png
+Ajouts dans cette version :
+- On conserve l'identité de l'instrument pour chaque fenêtre (inst_ids)
+- On génère des matrices de confusion par instrument (OOF)
+- Fenêtres non chevauchées (L=100, hop=100)
+- Normalisation calculée sur TRAIN uniquement, appliquée à VAL
 """
 
 import os, json, pickle
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple
+import pandas as pd
 
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
-from sklearn.model_selection import StratifiedKFold
-from sklearn.utils import shuffle as sk_shuffle
-
 # ------------- Config -------------
-DATA_PATH = "./data/final_from_full_A.pkl"   # update if needed
+DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "final_from_full_A.pkl")
 META_PATH = os.path.splitext(DATA_PATH)[0] + "_meta.json"
-OUT_DIR   = "./runs_cv_by_trials_fullmetrics"
+OUT_DIR   = os.path.join(".", "LOO/runs_loocv_by_trials_fullmetrics")
 
 SEQ_LEN    = 100
-HOP        = SEQ_LEN
+HOP        = SEQ_LEN          # -> aucun chevauchement
 BATCH_SIZE = 64
 EPOCHS     = 60
 SEED       = 42
 
-# Model
+# Modèle
 EMBED_DIM   = 128
 LSTM_UNITS  = EMBED_DIM // 2
 NUM_HEADS   = 4
@@ -54,21 +43,41 @@ BASE_LR      = 1e-3
 WEIGHT_DECAY = 3e-4
 CLIP_NORM    = 1.0
 
-# Cleaning
+# Nettoyage léger (avant normalisation)
 MAD_THRESH         = 6.0
 MAX_INTERP_RUN     = 20
 MEDIAN_WIN         = 3
 CLIP_SIGMA         = 5.0
 
-ZERO_RATIO_THRESHOLD = 0.50  # reject windows with >=50% zeros
-
-TEST_TRIAL_FRACTION = 0.15   # portion of trials reserved as final test (never seen in CV)
+ZERO_RATIO_THRESHOLD = 0.50  # rejeter fenêtres avec >=50% de zéros
 
 np.random.seed(SEED)
 tf.random.set_seed(SEED)
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# ------------- Labels (9-level layout) -------------
+# ------------- CSV Grouping (agrégation par participant-trial) -------------
+def group_predictions_by_trial(csv_file_path: str) -> str:
+    if not os.path.exists(csv_file_path):
+        print(f"Warning: File {csv_file_path} does not exist. Skipping grouping.")
+        return None
+    print(f"Grouping predictions from: {csv_file_path}")
+    df = pd.read_csv(csv_file_path)
+    probability_columns = [col for col in df.columns if col.startswith('p_')]
+    required_columns = ['participant', 'trial', 'true9', 'pred9'] + probability_columns
+    missing = [c for c in required_columns if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns: {missing}")
+        return None
+    agg = {'true9': lambda x: x.mode().iloc[0], 'pred9': lambda x: x.mode().iloc[0]}
+    for col in probability_columns: agg[col] = 'mean'
+    df_grouped = df.groupby(['participant', 'trial']).agg(agg).reset_index()
+    for col in probability_columns: df_grouped[col] = df_grouped[col].round(6)
+    out = os.path.splitext(csv_file_path)[0] + "_grouped_by_trial.csv"
+    df_grouped.to_csv(out, index=False)
+    print(f"Grouped data saved to: {out}")
+    return out
+
+# ------------- Labels (9 classes) -------------
 LEVEL9_ORDER = [
     "Medical student","Resident PGY1","Resident PGY2","Resident PGY3",
     "Resident PGY4","Resident PGY5","Resident PGY6","Fellow","Staff",
@@ -104,7 +113,7 @@ def to_coarse_and_pgy(lvl9: str) -> Tuple[int,int,int]:
         return COARSE_TO_IDX["Resident"], PGY_TO_IDX[f"PGY{k}"], 1
     return None, -1, 0
 
-# ------------- IO & Utilities -------------
+# ------------- IO & Utils -------------
 def load_items(path: str):
     with open(path, "rb") as f: obj = pickle.load(f)
     if not (isinstance(obj,(list,tuple)) and obj and isinstance(obj[0], dict)):
@@ -128,8 +137,7 @@ def _robust_z(x: np.ndarray) -> np.ndarray:
 
 def _interpolate_runs(y: np.ndarray, mask: np.ndarray, max_run: int) -> np.ndarray:
     y = y.copy()
-    n = len(y)
-    i = 0
+    n = len(y); i = 0
     while i < n:
         if not mask[i]:
             i += 1; continue
@@ -137,18 +145,15 @@ def _interpolate_runs(y: np.ndarray, mask: np.ndarray, max_run: int) -> np.ndarr
         while j < n and mask[j]: j += 1
         run_len = j - i
         if run_len <= max_run:
-            x0 = i-1
-            x1 = j
+            x0 = i-1; x1 = j
             if x0 >= 0 and x1 < n:
                 y[i:j] = np.linspace(y[x0], y[x1], run_len+2)[1:-1]
         i = j
     return y
 
 def clean_trial_CxT_no_norm(data_CxT: np.ndarray) -> np.ndarray:
-    """
-    Clean per channel per trial WITHOUT per-trial normalization (to avoid leakage).
-    Steps: robust z to detect spikes -> small-run interpolation -> median filter -> soft clipping.
-    """
+    """Nettoyage canal-par-canal sans normalisation (évite les fuites)."""
+    from scipy.ndimage import median_filter
     C,T = data_CxT.shape
     Y = data_CxT.astype(np.float32).copy()
     for c in range(C):
@@ -158,7 +163,6 @@ def clean_trial_CxT_no_norm(data_CxT: np.ndarray) -> np.ndarray:
         if np.any(out):
             y = _interpolate_runs(y, out, MAX_INTERP_RUN)
         if MEDIAN_WIN and MEDIAN_WIN >= 3:
-            from scipy.ndimage import median_filter
             y = median_filter(y, size=MEDIAN_WIN, mode="nearest")
         m = np.mean(y); s = np.std(y) + 1e-6
         y = np.clip(y, m - CLIP_SIGMA*s, m + CLIP_SIGMA*s)
@@ -166,11 +170,6 @@ def clean_trial_CxT_no_norm(data_CxT: np.ndarray) -> np.ndarray:
     return Y
 
 def compute_train_norm_stats(X_tr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Mean/std per channel computed on TRAIN windows only.
-    X_tr: [N, L, C]
-    Returns (mean[C], std[C])
-    """
     mean = X_tr.mean(axis=(0,1))
     std  = X_tr.std(axis=(0,1)) + 1e-6
     return mean.astype(np.float32), std.astype(np.float32)
@@ -178,21 +177,19 @@ def compute_train_norm_stats(X_tr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 def apply_norm(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     return (X - mean.reshape(1,1,-1)) / std.reshape(1,1,-1)
 
-# ------------- Feature selection -------------
+# ------------- Sélection des features -------------
 def select_feature_indices(ch_names: List[str]) -> List[int]:
-    # Keep everything except the two label rows which MUST be first in the file.
-    # We rely on meta["metric_names"] to match data rows.
-    # metric_names includes: ["Label(Expertise)","Label(Level)", <features...>]
-    # We'll drop idx 0 and 1 (labels) and keep the rest in the exact order.
+    # Les 2 premières lignes du fichier sont des labels → on les enlève
     return list(range(2, len(ch_names)))
 
-# ------------- Dataset windows builder -------------
+# ------------- Build fenêtres (avec instrument) -------------
 def build_windows_dataset(items, L=100, hop=100, meta_path=None):
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     ch_names_meta = meta.get("metric_names", None)
 
-    X, y9, yco, ypgy, yresmask, parts, trials, starts = [], [], [], [], [], [], [], []
+    X, y9, yco, ypgy, yresmask = [], [], [], [], []
+    parts, trials, starts, inst_ids = [], [], [], []
     kept_idx = None
     kept_names = None
 
@@ -207,41 +204,41 @@ def build_windows_dataset(items, L=100, hop=100, meta_path=None):
 
         if kept_idx is None:
             if ch_names_meta and len(ch_names_meta) == C:
-                kept_idx = select_feature_indices(ch_names_meta)   # drop the 2 label rows
+                kept_idx = select_feature_indices(ch_names_meta)
                 kept_names = [ch_names_meta[i] for i in kept_idx]
             else:
-                # fallback: assume labels are the first two rows
                 kept_idx = list(range(2, C))
                 kept_names = [f"feat_{i}" for i in kept_idx]
             if not kept_idx:
                 raise ValueError("No features found to keep.")
             print("→ Features used:", kept_names)
 
-        # Select features only (drop label rows)
         feats = data[kept_idx, :]
         C2,T2 = feats.shape
         if T2 < L:
             continue
 
-        # Keep a raw copy to compute zero ratio
         feats_raw = feats.copy()
         feats_cln = clean_trial_CxT_no_norm(feats)
 
-        pid = str(it.get("participant","unk"))
-        tid = f"{pid}__{str(it.get('trial','t0'))}"
+        pid  = str(it.get("participant","unk"))
+        trid = f"{pid}__{str(it.get('trial','t0'))}"
+        inst = str(it.get("instrument", "unknown"))
 
         for start in range(0, T2-L+1, hop):
             seg_raw = feats_raw[:, start:start+L]
             zero_ratio = float((seg_raw == 0).sum()) / float(seg_raw.size)
             if zero_ratio >= ZERO_RATIO_THRESHOLD:
-                continue  # drop window with too many zeros
+                continue  # trop de zéros → bruit/masques
 
             seg = feats_cln[:, start:start+L]
             X.append(seg.T.astype(np.float32))  # [L,C]
             y9.append(LEVEL_TO_IDX[lvl9])
             co, pgy, rmask = to_coarse_and_pgy(lvl9)
-            yco.append(co); ypgy.append(pgy); yresmask.append(rmask)
-            parts.append(pid); trials.append(tid); starts.append(start)
+            yco.append(co if (co is not None and 0<=co<4) else -1)
+            ypgy.append(pgy if (0<=pgy<6) else -1)
+            yresmask.append(rmask)
+            parts.append(pid); trials.append(trid); starts.append(start); inst_ids.append(inst)
 
     if not X:
         raise ValueError("No windows built. Check filters and L/HOP.")
@@ -253,8 +250,9 @@ def build_windows_dataset(items, L=100, hop=100, meta_path=None):
     parts = np.asarray(parts, object)
     trials= np.asarray(trials, object)
     starts= np.asarray(starts, np.int32)
+    inst_ids = np.asarray(inst_ids, object)
 
-    # Save which metrics were used (for traceability)
+    # Trace des métriques conservées
     map_path = os.path.join(OUT_DIR, "metrics_used_full.txt")
     with open(map_path, "w", encoding="utf-8") as f:
         f.write("Index\tMetric name\n")
@@ -262,7 +260,7 @@ def build_windows_dataset(items, L=100, hop=100, meta_path=None):
             f.write(f"{i}\t{nm}\n")
 
     print(f"Windows built = {len(X)} | L={L} | C={X.shape[2]} | classes=9")
-    return X,y9,yco,ypgy,yresmask,parts,trials,starts, kept_names
+    return X,y9,yco,ypgy,yresmask,parts,trials,starts,inst_ids, kept_names
 
 def to_categorical_int(y, n):
     Y = np.zeros((len(y), n), dtype=np.float32)
@@ -270,7 +268,7 @@ def to_categorical_int(y, n):
     Y[np.where(valid)[0], y[valid]] = 1.0
     return Y
 
-# ------------- Model -------------
+# ------------- Modèle -------------
 class TransformerBlock(layers.Layer):
     def __init__(self, embed_dim, num_heads, ff_dim, rate=0.1, **kw):
         super().__init__(**kw)
@@ -320,7 +318,7 @@ def build_multitask(seq_len, n_features, n_coarse=4, n_fine=6):
     )
     return model
 
-# ------------- Metrics/plots -------------
+# ------------- Métriques & Plots -------------
 def confusion_matrix_np(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) -> np.ndarray:
     cm = np.zeros((n_classes, n_classes), dtype=np.int64)
     for t,p in zip(y_true, y_pred):
@@ -387,37 +385,35 @@ def plot_heatmap_individuals(pred_counts, row_labels, col_labels, outpath, title
     plt.figure(figsize=(10, max(6, 0.25*len(row_labels))))
     plt.imshow(pred_counts, interpolation="nearest", aspect="auto")
     plt.title(title); plt.xlabel("Pred class (9)"); plt.ylabel("Participant")
-    xt = np.arange(len(col_labels))
-    yt = np.arange(len(row_labels))
+    xt = np.arange(len(col_labels)); yt = np.arange(len(row_labels))
     plt.xticks(xt, col_labels, rotation=45, ha="right")
     plt.yticks(yt, row_labels)
     plt.colorbar(); plt.tight_layout(); plt.savefig(outpath, dpi=150); plt.close()
 
-# ------------- Trial-level stratification -------------
-def stratified_trial_splits(trial_ids: np.ndarray, y9: np.ndarray, n_splits: int, seed: int):
+# ---- NEW: Confusions par instrument ----
+def save_confusions_by_instrument(y_true_all: np.ndarray,
+                                  y_pred_all: np.ndarray,
+                                  inst_ids_all: np.ndarray,
+                                  tag: str,
+                                  out_dir: str = OUT_DIR):
     """
-    Stratify by the majority 9-level label per TRIAL.
-    Returns a list of (train_idx, val_idx) over WINDOWS indices.
+    Sauvegarde une matrice de confusion par instrument.
+    Fichiers: confusion_windows_{tag}_inst-{instrument}.png
     """
-    uniq_trials = np.array(sorted(np.unique(trial_ids)))
-    # Majority label per trial (from windows y9)
-    trial_to_idx = {t:i for i,t in enumerate(uniq_trials)}
-    trial_labels = np.zeros(len(uniq_trials), np.int32)
-    for t in uniq_trials:
-        idx = np.where(trial_ids == t)[0]
-        cls, cnt = np.unique(y9[idx], return_counts=True)
-        trial_labels[trial_to_idx[t]] = int(cls[np.argmax(cnt)])
-
-    # Create stratified folds on trials
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    splits = []
-    for tr_trials_idx, va_trials_idx in skf.split(uniq_trials, trial_labels):
-        tr_trials = uniq_trials[tr_trials_idx]
-        va_trials = uniq_trials[va_trials_idx]
-        tr = np.where(np.isin(trial_ids, tr_trials))[0]
-        va = np.where(np.isin(trial_ids, va_trials))[0]
-        splits.append((tr,va))
-    return splits
+    present_insts = sorted(list({str(x) for x in inst_ids_all}))
+    if len(present_insts) == 0:
+        print("[warn] Aucun instrument détecté pour", tag)
+        return
+    for inst in present_insts:
+        idx = np.where(inst_ids_all == inst)[0]
+        if len(idx) == 0:
+            continue
+        y_t = y_true_all[idx]
+        y_p = y_pred_all[idx]
+        cf  = confusion_matrix_np(y_t, y_p, n_classes=len(LEVEL9_ORDER))
+        out = os.path.join(out_dir, f"confusion_windows_{tag}_inst-{inst}.png")
+        plot_confusion(cf, LEVEL9_ORDER, outpath=out, title=f"Confusion — {tag} — instrument={inst}")
+        print(f"[{tag}] confusion par instrument sauvée → {out}")
 
 # ------------- Majority helpers -------------
 def majority_aggregate(y_pred: np.ndarray, ids: np.ndarray) -> Dict[str,int]:
@@ -437,103 +433,83 @@ def mode_true_by_entity(y_true: np.ndarray, ids: np.ndarray) -> Dict[str,int]:
 def dict_to_arrays(d_pred: Dict[str,int], d_true: Dict[str,int]):
     ents = sorted(set(d_pred.keys()) & set(d_true.keys()))
     yhat = np.array([d_pred[e] for e in ents], dtype=np.int32)
-    ytru = np.array([d_true[e] for e in ents], dtype=np.int32)
+    ytru = np.array([d_true[e] for e in ents], dtype=np.int32
+    )
     return ents, ytru, yhat
 
-# ------------- Main -------------
+# ------------- Main (LOOCV by trials) -------------
 def main():
     print(f"📁 Loading: {DATA_PATH}")
     items = load_items(DATA_PATH)
-    (X_raw, y9, yco, ypgy, yresmask, part_ids, trial_ids, start_idx,
-     kept_names) = build_windows_dataset(items, L=SEQ_LEN, hop=HOP, meta_path=META_PATH)
+    (X_raw, y9, yco_idx, ypgy_idx, yresmask,
+     part_ids, trial_ids, start_idx, inst_ids, kept_names) = build_windows_dataset(
+        items, L=SEQ_LEN, hop=HOP, meta_path=META_PATH
+    )
     N,L,C = X_raw.shape
     print(f"→ Final features (C={C}): {kept_names}")
 
-    # One-hot targets
-    def to_cat(y, n):
-        Y = np.zeros((len(y),n), np.float32); Y[np.arange(len(y)), y] = 1.0; return Y
-    Yco  = to_cat(np.asarray([COARSE_TO_IDX["Resident"] if "Resident" in LEVEL9_ORDER[i] else
-                              COARSE_TO_IDX["Student"] if i==0 else
-                              COARSE_TO_IDX["Fellow"]  if i==7 else
-                              COARSE_TO_IDX["Staff"]   if i==8 else 0 for i in y9], dtype=np.int32), 4)
-    # more explicit mapping using existing helpers
-    Yco = np.zeros((len(y9),4), np.float32)
-    Ypgy= np.zeros((len(y9),6), np.float32)
-    for i,(lvl_idx) in enumerate(y9):
-        name = LEVEL9_ORDER[int(lvl_idx)]
-        co,pgy, rmask = to_coarse_and_pgy(name)
-        if co is not None and 0<=co<4: Yco[i, co] = 1.0
-        if 0<=pgy<6: Ypgy[i, pgy] = 1.0
-    mask_res = np.array([1 if LEVEL9_ORDER[int(k)].startswith("Resident ") else 0 for k in y9], np.int32)
-
-    # ---------------- Test holdout (by TRIALS) ----------------
-    uniq_trials = np.array(sorted(np.unique(trial_ids)))
-    rng = np.random.default_rng(SEED)
-    test_trials = rng.choice(uniq_trials, size=max(1, int(round(len(uniq_trials)*TEST_TRIAL_FRACTION))), replace=False)
-    not_test_trials = uniq_trials[~np.isin(uniq_trials, test_trials)]
-
-    test_idx = np.where(np.isin(trial_ids, test_trials))[0]
-    cv_idx   = np.where(np.isin(trial_ids, not_test_trials))[0]
-
-    # ---------------- CV (stratified by TRIAL majority) ----------------
-    splits = stratified_trial_splits(trial_ids[cv_idx], y9[cv_idx], n_splits=5, seed=SEED)
-
+    # Holders OOF
     oof_pred9 = np.zeros(N, np.int32)
     oof_prob9 = np.zeros((N,9), np.float32)
     fold_id   = np.zeros(N, np.int32)
 
-    for fold_idx, (tr_rel, va_rel) in enumerate(splits, 1):
-        tr = cv_idx[tr_rel]; va = cv_idx[va_rel]
+    uniq_trials = np.array(sorted(np.unique(trial_ids)))
+    print(f"LOOCV by trials: {len(uniq_trials)} unique trials")
+
+    # Boucle Leave-One-Out
+    for fold_idx, val_trial in enumerate(uniq_trials, start=1):
+        va = np.where(trial_ids == val_trial)[0]
+        tr = np.where(trial_ids != val_trial)[0]
+        print(f"\n=== LOO fold {fold_idx}/{len(uniq_trials)} — val trial: {val_trial} ===")
 
         Xtr_raw, Xva_raw = X_raw[tr], X_raw[va]
         y9tr, y9va = y9[tr], y9[va]
-        # rebuild heads
-        Yco_tr = np.zeros((len(tr),4), np.float32)
-        Ypgy_tr= np.zeros((len(tr),6), np.float32)
-        mask_tr= np.zeros((len(tr),), np.float32)
-        for i,(idx) in enumerate(tr):
-            name = LEVEL9_ORDER[int(y9[idx])]
-            co,pgy,rm = to_coarse_and_pgy(name); mask_tr[i]=rm
-            if co is not None and 0<=co<4: Yco_tr[i,co]=1.0
-            if 0<=pgy<6: Ypgy_tr[i,pgy]=1.0
 
-        Yco_va = np.zeros((len(va),4), np.float32)
-        Ypgy_va= np.zeros((len(va),6), np.float32)
-        mask_va= np.zeros((len(va),), np.float32)
-        for i,(idx) in enumerate(va):
-            name = LEVEL9_ORDER[int(y9[idx])]
-            co,pgy,rm = to_coarse_and_pgy(name); mask_va[i]=rm
-            if co is not None and 0<=co<4: Yco_va[i,co]=1.0
-            if 0<=pgy<6: Ypgy_va[i,pgy]=1.0
+        # Heads (coarse/fine) + masque résident
+        def build_heads(idxs):
+            Yco = np.zeros((len(idxs),4), np.float32)
+            Ypg = np.zeros((len(idxs),6), np.float32)
+            Msk = np.zeros((len(idxs),),  np.float32)
+            for i, gi in enumerate(idxs):
+                name = LEVEL9_ORDER[int(y9[gi])]
+                co,pgy,rm = to_coarse_and_pgy(name)
+                if co is not None and 0<=co<4: Yco[i,co]=1.0
+                if 0<=pgy<6: Ypg[i,pgy]=1.0
+                Msk[i]=rm
+            return Yco, Ypg, Msk
 
-        # Train-only normalization
+        Yco_tr, Ypgy_tr, mask_tr = build_heads(tr)
+        Yco_va, Ypgy_va, mask_va = build_heads(va)
+
+        # Normalisation train-only
         mean_c, std_c = compute_train_norm_stats(Xtr_raw)
         Xtr = apply_norm(Xtr_raw, mean_c, std_c)
         Xva = apply_norm(Xva_raw, mean_c, std_c)
 
-        # Balance train by y9 (simple oversampling)
+        # Équilibrage simple par sur-échantillonnage sur y9
         idx_by_c = {c: np.where(y9tr==c)[0] for c in range(9)}
         sizes = {c: len(v) for c,v in idx_by_c.items() if len(v)>0}
         max_n = max(sizes.values()) if sizes else 0
         rng_local = np.random.default_rng(SEED+fold_idx)
-        new_tr_idx = []
-        for c, idxs in idx_by_c.items():
-            if len(idxs)==0: continue
-            need = max_n - len(idxs)
+        new_tr_idx_rel = []
+        for c, idxs_rel in idx_by_c.items():
+            if len(idxs_rel)==0: continue
+            need = max_n - len(idxs_rel)
             if need > 0:
-                add = rng_local.choice(idxs, size=need, replace=True)
-                idxs = np.concatenate([idxs, add])
-            new_tr_idx.extend(list(idxs))
-        new_tr_idx = np.array(new_tr_idx, np.int64)
-        rng_local.shuffle(new_tr_idx)
+                add = rng_local.choice(idxs_rel, size=need, replace=True)
+                idxs_rel = np.concatenate([idxs_rel, add])
+            new_tr_idx_rel.extend(list(idxs_rel))
+        new_tr_idx_rel = np.array(new_tr_idx_rel, np.int64)
+        rng_local.shuffle(new_tr_idx_rel)
 
-        Xtr = Xtr[new_tr_idx]
-        y9tr_bal = y9tr[new_tr_idx]
-        Yco_tr = Yco_tr[new_tr_idx]
-        Ypgy_tr= Ypgy_tr[new_tr_idx]
-        mask_tr= mask_tr[new_tr_idx]
+        # Remap des têtes/masques
+        Xtr = Xtr[new_tr_idx_rel]
+        y9tr_bal = y9tr[new_tr_idx_rel]
+        Yco_tr = Yco_tr[new_tr_idx_rel]
+        Ypgy_tr= Ypgy_tr[new_tr_idx_rel]
+        mask_tr= mask_tr[new_tr_idx_rel]
 
-        # Model
+        # Modèle
         model = build_multitask(SEQ_LEN, Xtr.shape[2], n_coarse=4, n_fine=6)
 
         class ValBalancedAcc9(keras.callbacks.Callback):
@@ -561,6 +537,7 @@ def main():
             sample_weight={"coarse": sw_coarse_tr, "fine": sw_fine_tr}
         )
 
+        # Validation sur le trial laissé de côté
         p_coarse, p_fine = predict_heads(model, Xva)
         P9_va = reconstruct_level9_from_heads(p_coarse, p_fine)
         yhat9_va = np.argmax(P9_va, axis=1)
@@ -571,9 +548,9 @@ def main():
 
         acc = (y9va == yhat9_va).mean()
         bacc= balanced_accuracy_np(y9va, yhat9_va, 9)
-        print(f"[Fold {fold_idx}] acc9={acc:.4f} | bal_acc9={bacc:.4f}")
+        print(f"[LOO {fold_idx}] acc9={acc:.4f} | bal_acc9={bacc:.4f}")
 
-    # ===== OOF Results (windows) =====
+    # ===== OOF (windows) =====
     def save_report_and_plots(tag, y_true, y_pred, ids_for_heatmap=None):
         rep_txt = classification_report_simple(y_true, y_pred, LEVEL9_ORDER)
         with open(os.path.join(OUT_DIR,f"report_windows_{tag}.txt"),"w",encoding="utf-8") as f: f.write(rep_txt)
@@ -599,17 +576,44 @@ def main():
 
     save_report_and_plots("oof", y9, oof_pred9, ids_for_heatmap=part_ids)
 
-    # CSV (windows OOF with probs)
+    # ➜ Matrices de confusion par instrument (OOF)
+    save_confusions_by_instrument(
+        y_true_all=y9, y_pred_all=oof_pred9, inst_ids_all=inst_ids, tag="oof"
+    )
+
+    # CSV (windows OOF avec proba)
     win_csv = os.path.join(OUT_DIR,"pred_windows_oof.csv")
     with open(win_csv,"w",encoding="utf-8") as f:
-        header=["fold","participant","trial","start","true9","pred9"]+[f"p_{c}" for c in LEVEL9_ORDER]
+        header=["fold","participant","trial","start","instrument","true9","pred9"]+[f"p_{c}" for c in LEVEL9_ORDER]
         f.write(",".join(header)+"\n")
         for i in range(len(y9)):
-            row=[str(int(fold_id[i])), str(part_ids[i]), str(trial_ids[i]), str(int(start_idx[i])),
+            row=[str(int(fold_id[i])), str(part_ids[i]), str(trial_ids[i]), str(int(start_idx[i])), str(inst_ids[i]),
                  LEVEL9_ORDER[int(y9[i])], LEVEL9_ORDER[int(oof_pred9[i])]] + [f"{float(oof_prob9[i,j]):.6f}" for j in range(9)]
             f.write(",".join(row)+"\n")
 
-    # Participant-level (majority) from OOF
+    # Version agrégée par participant-trial
+    print("\n📊 Generating grouped OOF predictions by participant-trial...")
+    group_predictions_by_trial(win_csv)
+
+    # Participant-level (majorité) à partir de l’OOF
+    def majority_aggregate(y_pred: np.ndarray, ids: np.ndarray) -> Dict[str,int]:
+        out = {}
+        for ent in np.unique(ids):
+            cls, cnt = np.unique(y_pred[ids==ent], return_counts=True)
+            out[ent] = int(cls[np.argmax(cnt)])
+        return out
+    def mode_true_by_entity(y_true: np.ndarray, ids: np.ndarray) -> Dict[str,int]:
+        out = {}
+        for ent in np.unique(ids):
+            cls, cnt = np.unique(y_true[ids==ent], return_counts=True)
+            out[ent] = int(cls[np.argmax(cnt)])
+        return out
+    def dict_to_arrays(d_pred: Dict[str,int], d_true: Dict[str,int]):
+        ents = sorted(set(d_pred.keys()) & set(d_true.keys()))
+        yhat = np.array([d_pred[e] for e in ents], dtype=np.int32)
+        ytru = np.array([d_true[e] for e in ents], dtype=np.int32)
+        return ents, ytru, yhat
+
     d_pred_part = majority_aggregate(oof_pred9, part_ids)
     d_true_part = mode_true_by_entity(y9, part_ids)
     ents, ytrue_part, ypred_part = dict_to_arrays(d_pred_part, d_true_part)
@@ -619,58 +623,6 @@ def main():
     cf_part = confusion_matrix_np(ytrue_part, ypred_part, 9)
     plot_confusion(cf_part, LEVEL9_ORDER, os.path.join(OUT_DIR,"confusion_participants_majority_oof.png"),
                    title="Confusion — participants (majority, OOF)")
-
-    # ---------------- Final TEST evaluation ----------------
-    # Train on all non-test windows (cv_idx), normalize on that, eval on test_idx
-    if len(test_idx) > 0:
-        Xtr_all_raw = X_raw[cv_idx]; y9_tr_all = y9[cv_idx]
-        Yco_all = np.zeros((len(cv_idx),4), np.float32)
-        Ypgy_all= np.zeros((len(cv_idx),6), np.float32)
-        mask_all= np.zeros((len(cv_idx),), np.float32)
-        for i,(idx) in enumerate(cv_idx):
-            name = LEVEL9_ORDER[int(y9[idx])]
-            co,pgy,rm = to_coarse_and_pgy(name); mask_all[i]=rm
-            if co is not None and 0<=co<4: Yco_all[i,co]=1.0
-            if 0<=pgy<6: Ypgy_all[i,pgy]=1.0
-
-        mean_c, std_c = compute_train_norm_stats(Xtr_all_raw)
-        Xtr_all = apply_norm(Xtr_all_raw, mean_c, std_c)
-        Xte = apply_norm(X_raw[test_idx], mean_c, std_c)
-        y9_te = y9[test_idx]
-
-        model = build_multitask(SEQ_LEN, Xtr_all.shape[2], n_coarse=4, n_fine=6)
-        sw_coarse = np.ones(len(Xtr_all), dtype=np.float32)
-        sw_fine   = mask_all.astype(np.float32)
-        model.fit(Xtr_all, {"coarse": Yco_all, "fine": Ypgy_all},
-                  epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=2,
-                  sample_weight={"coarse": sw_coarse, "fine": sw_fine})
-
-        p_coarse, p_fine = predict_heads(model, Xte)
-        P9_te = reconstruct_level9_from_heads(p_coarse, p_fine)
-        yhat9_te = np.argmax(P9_te, axis=1)
-
-        # windows report + confusion
-        save_report_and_plots("test", y9_te, yhat9_te, ids_for_heatmap=part_ids[test_idx])
-
-        # CSVs
-        test_win_csv = os.path.join(OUT_DIR,"test_pred_windows.csv")
-        with open(test_win_csv,"w",encoding="utf-8") as f:
-            header=["participant","trial","start","true9","pred9"]+[f"p_{c}" for c in LEVEL9_ORDER]
-            f.write(",".join(header)+"\n")
-            for i,gi in enumerate(test_idx):
-                row=[str(part_ids[gi]), str(trial_ids[gi]), str(int(start_idx[gi])),
-                     LEVEL9_ORDER[int(y9[gi])], LEVEL9_ORDER[int(yhat9_te[i])]] + [f"{float(P9_te[i,j]):.6f}" for j in range(9)]
-                f.write(",".join(row)+"\n")
-
-        d_pred_part_t = majority_aggregate(yhat9_te, part_ids[test_idx])
-        d_true_part_t = mode_true_by_entity(y9[test_idx], part_ids[test_idx])
-        ents_t, ytrue_part_t, ypred_part_t = dict_to_arrays(d_pred_part_t, d_true_part_t)
-        rep_part_t = classification_report_simple(ytrue_part_t, ypred_part_t, LEVEL9_ORDER)
-        with open(os.path.join(OUT_DIR,"test_report_participants.txt"),"w",encoding="utf-8") as f: f.write(rep_part_t)
-        print("\n=== TEST participants (majority, 9 classes) ===\n"+rep_part_t)
-        cf_part_t = confusion_matrix_np(ytrue_part_t, ypred_part_t, 9)
-        plot_confusion(cf_part_t, LEVEL9_ORDER, os.path.join(OUT_DIR,"confusion_participants_majority_test.png"),
-                       title="Confusion — participants (majority, TEST)")
 
     print("\n✅ Done. Check outputs under:", OUT_DIR)
 
