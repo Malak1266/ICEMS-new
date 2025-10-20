@@ -4,14 +4,15 @@ Leave-One-Trial-Out (LOOCV) — LSTM+Transformer — Train-only normalization
 
 Version multi-instruments (fenêtre unique par trial/intervalle):
 - Chaque fenêtre regroupe les 3 instruments (bipolar → scissors → cavitron) concaténés
-- 4 métriques par instrument: PosMag, Velocity, Acceleration, Jerk   # <<< CHANGEMENT
+- 4 métriques par instrument: PosMag, Velocity, Acceleration, Jerk
 - + 2 canaux globaux: Distance Bipolar–Cavitron, Distance Bipolar–Scissors
 - Fenêtres non chevauchées (L=100, hop=100)
 - Normalisation calculée sur TRAIN uniquement, appliquée à VAL
 - Sortie OOF + matrices de confusion par instrument (basées sur présence dans la fenêtre)
+- Analyse d'influence des métriques (permutation & ablation), export CSV + barplots
 """
 
-import os, json, pickle
+import os, json, pickle, glob
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple
@@ -183,18 +184,18 @@ def apply_norm(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     return (X - mean.reshape(1,1,-1)) / std.reshape(1,1,-1)
 
 # ------------- Sélection des features mono-instrument -------------
-# Dans le PKL "Format B", les lignes sont:
+# Format B (sans X/Y/Z):
 # 0: Label(Expertise), 1: Label(Level),
 # 2: PosMag, 3: Velocity, 4: Acceleration, 5: Jerk,
 # 6: Dist Bipolar–Cavitron, 7: Dist Bipolar–Scissors
-MONO_IDX_BLOCK = [2,3,4,5]     # <<< CHANGEMENT : 4 canaux par instrument (sans X/Y/Z)
-DIST_IDX       = [6,7]         # <<< CHANGEMENT : indices des distances dans les entrées mono
+MONO_IDX_BLOCK = [2,3,4,5]     # 4 canaux par instrument (sans X/Y/Z)
+DIST_IDX       = [6,7]         # indices des distances potentiellement injectées
 
 # ------------- Build fenêtres multi-instruments -------------
 def build_windows_dataset_multi(items, L=100, hop=100):
     """
     Construit des fenêtres qui concatènent, pour un même (participant,trial):
-      [bloc bipolar 4ch] + [bloc scissors 4ch] + [bloc cavitron 4ch] + [dist_bip_cav, dist_bip_sci]   # <<< CHANGEMENT
+      [bloc bipolar 4ch] + [bloc scissors 4ch] + [bloc cavitron 4ch] + [dist_bip_cav, dist_bip_sci]
 
     Si un instrument n'est pas présent: bloc de zéros.
     Les distances sont prises depuis n'importe quelle entrée du trial où elles sont disponibles
@@ -218,8 +219,7 @@ def build_windows_dataset_multi(items, L=100, hop=100):
 
     # noms des features par instrument (4 canaux)
     for inst in INST_ORDER:
-        kept_names += [f"{inst}:PosMag", f"{inst}:Velocity",
-                       f"{inst}:Acceleration", f"{inst}:Jerk"]             # <<< CHANGEMENT
+        kept_names += [f"{inst}:PosMag", f"{inst}:Velocity", f"{inst}:Acceleration", f"{inst}:Jerk"]
     kept_names += ["Distance Bipolar–Cavitron", "Distance Bipolar–Scissors"]
 
     def _first_array(lst_items, idxs):
@@ -243,7 +243,7 @@ def build_windows_dataset_multi(items, L=100, hop=100):
         mono = {}
         presence = []
         for inst in INST_ORDER:
-            arr = _first_array(inst_map.get(inst, []), MONO_IDX_BLOCK)  # (4, T) ou None  # <<< CHANGEMENT
+            arr = _first_array(inst_map.get(inst, []), MONO_IDX_BLOCK)  # (4, T) ou None
             mono[inst] = arr
             presence.append(arr is not None)
         presence = np.array(presence, dtype=bool)
@@ -253,7 +253,7 @@ def build_windows_dataset_multi(items, L=100, hop=100):
         # distances globales (peuvent venir d'entrées mono ou distance-only)
         dist_bip_cav = _first_array(inst_map.get("bipolar_to_cavitron", []), [0])  # (1,T) si distance-only
         dist_bip_sci = _first_array(inst_map.get("bipolar_to_scissors", []), [0])
-        # si distances non trouvées via distance-only, tenter via entrées mono (lignes 6,7 du Format B)  # <<< CHANGEMENT
+        # si distances non trouvées via distance-only, tenter via entrées mono (lignes 6,7)
         if dist_bip_cav is None or dist_bip_sci is None:
             for inst in INST_ORDER:
                 arr = _first_array(inst_map.get(inst, []), DIST_IDX)
@@ -269,19 +269,19 @@ def build_windows_dataset_multi(items, L=100, hop=100):
             continue
         T = int(min(Ts))
 
-        # composer le bloc feature (12 + 2 = 14 canaux)  # <<< CHANGEMENT
+        # composer le bloc feature (12 + 2 = 14 canaux)
         feat_blocks = []
         for inst in INST_ORDER:
             if mono[inst] is not None:
                 feat_blocks.append(mono[inst][:, :T])  # (4,T)
             else:
-                feat_blocks.append(np.zeros((4, T), dtype=float))  # <<< CHANGEMENT
+                feat_blocks.append(np.zeros((4, T), dtype=float))
         if dist_bip_cav is None: dist_bip_cav = np.zeros((1, T), dtype=float)
         else:                      dist_bip_cav = dist_bip_cav[:, :T]
         if dist_bip_sci is None: dist_bip_sci = np.zeros((1, T), dtype=float)
         else:                     dist_bip_sci = dist_bip_sci[:, :T]
 
-        feats_CxT = np.vstack(feat_blocks + [dist_bip_cav, dist_bip_sci])  # (14, T)  # <<< CHANGEMENT
+        feats_CxT = np.vstack(feat_blocks + [dist_bip_cav, dist_bip_sci])  # (14, T)
         feats_CxT_cln = clean_trial_CxT_no_norm(feats_CxT)
 
         # label (on prend le premier niveau valide rencontré dans les entrées de ce trial)
@@ -489,6 +489,117 @@ def save_confusions_by_instrument_presence(y_true_all: np.ndarray,
         plot_confusion(cf, LEVEL9_ORDER, outpath=out, title=f"Confusion — {tag} — instrument={inst}")
         print(f"[{tag}] confusion (présence) par instrument sauvée → {out}")
 
+# ==================== Importance des métriques (permutation & ablation) ====================
+def _predict_level9(model, X):
+    p_coarse, p_fine = predict_heads(model, X)
+    P9 = reconstruct_level9_from_heads(p_coarse, p_fine)
+    yhat9 = np.argmax(P9, axis=1)
+    return yhat9
+
+def _bal_acc_model(model, X, y_true):
+    yhat = _predict_level9(model, X)
+    return balanced_accuracy_np(y_true, yhat, n_classes=len(LEVEL9_ORDER))
+
+def _channel_groups(kept_names):
+    """
+    Map index -> (instrument, metric).
+    0..3 = bipolar:[PosMag,Velocity,Acceleration,Jerk],
+    4..7 = scissors:..., 8..11 = cavitron:..., 12=Dist BC, 13=Dist BS
+    """
+    groups = []
+    per_inst_metrics = ["PosMag","Velocity","Acceleration","Jerk"]
+    for i, nm in enumerate(kept_names):
+        if i < 12:
+            block = i // 4
+            midx  = i % 4
+            inst  = ["bipolar","scissors","cavitron"][block]
+            metric= per_inst_metrics[midx]
+        elif i == 12:
+            inst, metric = "global", "Distance Bipolar–Cavitron"
+        elif i == 13:
+            inst, metric = "global", "Distance Bipolar–Scissors"
+        else:
+            inst, metric = "unknown", nm
+        groups.append((inst, metric))
+    return groups
+
+def _channel_importance(model, X_val, y_val, kept_names, mode="perm", repeats=3, max_val_samples=800, rng_seed=123):
+    """
+    Retourne un dict avec:
+      - 'per_channel': list dicts {idx, name, inst, metric, delta_bacc_*_mean, *_std}
+      - 'bacc_ref': balanced accuracy de référence
+    mode: "perm" (permutation) ou "zero" (ablation)
+    """
+    rng = np.random.default_rng(rng_seed)
+    # échantillonner pour accélérer (optionnel)
+    if len(X_val) > max_val_samples:
+        idx = rng.choice(len(X_val), size=max_val_samples, replace=False)
+        Xv  = X_val[idx]
+        yv  = y_val[idx]
+    else:
+        Xv, yv = X_val, y_val
+
+    bacc_ref = _bal_acc_model(model, Xv, yv)
+    C = Xv.shape[2]
+    groups = _channel_groups(kept_names)
+    out = []
+
+    for c in range(C):
+        drops = []
+        for _ in range(repeats):
+            Xmod = Xv.copy()
+            if mode == "perm":
+                perm = rng.permutation(len(Xmod))
+                Xmod[:, :, c] = Xmod[perm, :, c]
+            elif mode == "zero":
+                Xmod[:, :, c] = 0.0
+            else:
+                raise ValueError("mode must be 'perm' or 'zero'")
+            bacc_mod = _bal_acc_model(model, Xmod, yv)
+            drops.append(max(0.0, bacc_ref - bacc_mod))
+        drop_mean = float(np.mean(drops))
+        drop_std  = float(np.std(drops))
+        inst, metric = groups[c]
+        out.append({
+            "idx": c,
+            "name": kept_names[c],
+            "instrument": inst,
+            "metric": metric,
+            f"delta_bacc_{mode}_mean": drop_mean,
+            f"delta_bacc_{mode}_std": drop_std
+        })
+    return {"per_channel": out, "bacc_ref": bacc_ref}
+
+def _aggregate_importance_rows(rows):
+    """Agrège par (instrument, metric)."""
+    df = pd.DataFrame(rows)
+    agg_cols = []
+    for col in ["delta_bacc_perm_mean","delta_bacc_zero_mean"]:
+        if col in df.columns: agg_cols.append((col, "mean"))
+    for col in ["delta_bacc_perm_std","delta_bacc_zero_std"]:
+        if col in df.columns: agg_cols.append((col, "mean"))
+    if not agg_cols:
+        return None, None
+    agg = df.groupby(["instrument","metric"]).agg(dict(agg_cols)).reset_index()
+    agg.columns = ["instrument","metric"] + [f"{c[0]}_{c[1]}" for c in agg.columns[2:]]
+    return df, agg
+
+def _plot_importance_bar(df_channel, out_png, top_k=20, col="delta_bacc_perm_mean"):
+    """Barplot simple des top-k canaux les plus influents."""
+    if col not in df_channel.columns:
+        return
+    d = df_channel.sort_values(col, ascending=False).head(top_k)
+    labels = [f"{r['instrument']}:{r['metric']}" for _,r in d.iterrows()]
+    vals = d[col].values
+    plt.figure(figsize=(10, 5))
+    plt.bar(range(len(vals)), vals)
+    plt.xticks(range(len(vals)), labels, rotation=45, ha="right")
+    plt.ylabel("Δ balanced accuracy")
+    plt.title(f"Top-{top_k} feature influence ({col})")
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=150)
+    plt.close()
+
 # ------------- Majority helpers -------------
 def majority_aggregate(y_pred: np.ndarray, ids: np.ndarray) -> Dict[str,int]:
     out = {}
@@ -626,6 +737,58 @@ def main():
         acc = (y9va == yhat9_va).mean()
         bacc= balanced_accuracy_np(y9va, yhat9_va, 9)
         print(f"[LOO {fold_idx}] acc9={acc:.4f} | bal_acc9={bacc:.4f}")
+
+        # === Importance par canal sur le trial de validation ===
+        # (on reste sur Xva normalisé)
+        imp_perm = _channel_importance(model, Xva, y9va, kept_names, mode="perm", repeats=3, max_val_samples=800, rng_seed=SEED+fold_idx)
+        imp_zero = _channel_importance(model, Xva, y9va, kept_names, mode="zero", repeats=1, max_val_samples=800, rng_seed=SEED+fold_idx)
+
+        dfp = pd.DataFrame(imp_perm["per_channel"])
+        dfz = pd.DataFrame(imp_zero["per_channel"])
+        df_fold = pd.merge(dfp, dfz[["idx","delta_bacc_zero_mean","delta_bacc_zero_std"]], on="idx", how="left")
+        df_fold["fold"] = fold_idx
+        fold_imp_csv = os.path.join(OUT_DIR, f"importance_channels_fold{fold_idx:03d}.csv")
+        df_fold.to_csv(fold_imp_csv, index=False)
+        print(f"[Fold {fold_idx}] saved channel importance → {fold_imp_csv}")
+
+        # agrégation par (instrument,metric)
+        _, df_group = _aggregate_importance_rows(df_fold.to_dict(orient="records"))
+        if df_group is not None:
+            fold_group_csv = os.path.join(OUT_DIR, f"importance_groups_fold{fold_idx:03d}.csv")
+            df_group.to_csv(fold_group_csv, index=False)
+            print(f"[Fold {fold_idx}] saved grouped importance → {fold_group_csv}")
+
+    # ===== Agrégation finale des importances sur tous les folds =====
+    try:
+        all_ch = []
+        for p in glob.glob(os.path.join(OUT_DIR, "importance_channels_fold*.csv")):
+            all_ch.append(pd.read_csv(p))
+        if all_ch:
+            df_all = pd.concat(all_ch, ignore_index=True)
+            # moyenne par canal sur les folds
+            grp = df_all.groupby(["idx","name","instrument","metric"], as_index=False).agg({
+                "delta_bacc_perm_mean":"mean",
+                "delta_bacc_zero_mean":"mean"
+            })
+            out_csv = os.path.join(OUT_DIR, "importance_channels_overall.csv")
+            grp.to_csv(out_csv, index=False)
+            print(f"[Overall] saved channel importance → {out_csv}")
+
+            # plot top-20 (permutation)
+            _plot_importance_bar(grp, os.path.join(OUT_DIR,"importance_channels_top20_perm.png"),
+                                 top_k=20, col="delta_bacc_perm_mean")
+
+            # agrégation par (instrument, metric)
+            df_channel, df_group = _aggregate_importance_rows(grp.to_dict(orient="records"))
+            if df_group is not None:
+                out_csv_g = os.path.join(OUT_DIR, "importance_groups_overall.csv")
+                df_group.to_csv(out_csv_g, index=False)
+                print(f"[Overall] saved grouped importance → {out_csv_g}")
+
+                _plot_importance_bar(df_channel, os.path.join(OUT_DIR,"importance_groups_top20_perm.png"),
+                                     top_k=20, col="delta_bacc_perm_mean")
+    except Exception as e:
+        print("⚠️ Importance aggregation failed:", e)
 
     # ===== OOF (windows) =====
     def save_report_and_plots(tag, y_true, y_pred, ids_for_heatmap=None):
