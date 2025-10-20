@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Leave-One-Trial-Out (LOOCV) — LSTM+Transformer — Full metrics — Train-only normalization
+Leave-One-Trial-Out (LOOCV) — LSTM+Transformer — Train-only normalization
 
-Ajouts dans cette version :
-- On conserve l'identité de l'instrument pour chaque fenêtre (inst_ids)
-- On génère des matrices de confusion par instrument (OOF)
+Version multi-instruments (fenêtre unique par trial/intervalle):
+- Chaque fenêtre regroupe les 3 instruments (bipolar → scissors → cavitron) concaténés
+- 4 métriques par instrument: PosMag, Velocity, Acceleration, Jerk   # <<< CHANGEMENT
+- + 2 canaux globaux: Distance Bipolar–Cavitron, Distance Bipolar–Scissors
 - Fenêtres non chevauchées (L=100, hop=100)
 - Normalisation calculée sur TRAIN uniquement, appliquée à VAL
+- Sortie OOF + matrices de confusion par instrument (basées sur présence dans la fenêtre)
 """
 
 import os, json, pickle
@@ -20,9 +22,9 @@ from tensorflow import keras
 from tensorflow.keras import layers
 
 # ------------- Config -------------
-DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "final_from_full_A.pkl")
+DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "final_from_full_B.pkl")
 META_PATH = os.path.splitext(DATA_PATH)[0] + "_meta.json"
-OUT_DIR   = os.path.join(".", "LOO/runs_loocv_by_trials_fullmetrics")
+OUT_DIR   = os.path.join(".", "Results_ICEMS_multi_full_LOOCV")
 
 SEQ_LEN    = 100
 HOP        = SEQ_LEN          # -> aucun chevauchement
@@ -49,7 +51,10 @@ MAX_INTERP_RUN     = 20
 MEDIAN_WIN         = 3
 CLIP_SIGMA         = 5.0
 
-ZERO_RATIO_THRESHOLD = 0.50  # rejeter fenêtres avec >=50% de zéros
+ZERO_RATIO_THRESHOLD = 0.75  # rejeter fenêtres avec >=75% de zéros
+
+# Instruments gérés et ordre fixe
+INST_ORDER = ["bipolar", "scissors", "cavitron"]
 
 np.random.seed(SEED)
 tf.random.set_seed(SEED)
@@ -177,68 +182,138 @@ def compute_train_norm_stats(X_tr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 def apply_norm(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     return (X - mean.reshape(1,1,-1)) / std.reshape(1,1,-1)
 
-# ------------- Sélection des features -------------
-def select_feature_indices(ch_names: List[str]) -> List[int]:
-    # Les 2 premières lignes du fichier sont des labels → on les enlève
-    return list(range(2, len(ch_names)))
+# ------------- Sélection des features mono-instrument -------------
+# Dans le PKL "Format B", les lignes sont:
+# 0: Label(Expertise), 1: Label(Level),
+# 2: PosMag, 3: Velocity, 4: Acceleration, 5: Jerk,
+# 6: Dist Bipolar–Cavitron, 7: Dist Bipolar–Scissors
+MONO_IDX_BLOCK = [2,3,4,5]     # <<< CHANGEMENT : 4 canaux par instrument (sans X/Y/Z)
+DIST_IDX       = [6,7]         # <<< CHANGEMENT : indices des distances dans les entrées mono
 
-# ------------- Build fenêtres (avec instrument) -------------
-def build_windows_dataset(items, L=100, hop=100, meta_path=None):
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-    ch_names_meta = meta.get("metric_names", None)
+# ------------- Build fenêtres multi-instruments -------------
+def build_windows_dataset_multi(items, L=100, hop=100):
+    """
+    Construit des fenêtres qui concatènent, pour un même (participant,trial):
+      [bloc bipolar 4ch] + [bloc scissors 4ch] + [bloc cavitron 4ch] + [dist_bip_cav, dist_bip_sci]   # <<< CHANGEMENT
+
+    Si un instrument n'est pas présent: bloc de zéros.
+    Les distances sont prises depuis n'importe quelle entrée du trial où elles sont disponibles
+    (mono avec injection OU entrées "distance-only"), masquées en amont par le générateur.
+    """
+    # Grouper items par (participant, trial, instrument)
+    by_pti = {}
+    for it in items:
+        pid  = str(it.get("participant", ""))
+        tr   = str(it.get("trial", ""))
+        inst = str(it.get("instrument", "")).lower()
+        if inst not in INST_ORDER and not inst.startswith("bipolar_to_"):
+            continue
+        by_pti.setdefault((pid,tr), {}).setdefault(inst, []).append(it)
 
     X, y9, yco, ypgy, yresmask = [], [], [], [], []
-    parts, trials, starts, inst_ids = [], [], [], []
-    kept_idx = None
-    kept_names = None
+    parts, trials, starts = [], [], []
+    inst_presence = []   # [N, 3] bool
+    inst_combo    = []   # texte "bipolar|scissors|cavitron" (présents)
+    kept_names = []
 
-    for it in items:
-        lvl_raw = it.get("level")
-        lvl9 = map_level_to_9(lvl_raw)
+    # noms des features par instrument (4 canaux)
+    for inst in INST_ORDER:
+        kept_names += [f"{inst}:PosMag", f"{inst}:Velocity",
+                       f"{inst}:Acceleration", f"{inst}:Jerk"]             # <<< CHANGEMENT
+    kept_names += ["Distance Bipolar–Cavitron", "Distance Bipolar–Scissors"]
+
+    def _first_array(lst_items, idxs):
+        """Retourne le premier array (len=T) trouvé aux indices `idxs` dans .data"""
+        for it in lst_items:
+            A = to_array_CxT(it["data"])  # (rows, T)
+            if A.shape[0] > max(idxs):
+                return A[idxs, :]
+        return None
+
+    def _level_from_any(lst_items):
+        for it in lst_items:
+            lvl_raw = it.get("level")
+            lvl9 = map_level_to_9(lvl_raw)
+            if lvl9 is not None:
+                return lvl9
+        return None
+
+    for (pid,tr), inst_map in by_pti.items():
+        # rassembler matrices mono par instrument
+        mono = {}
+        presence = []
+        for inst in INST_ORDER:
+            arr = _first_array(inst_map.get(inst, []), MONO_IDX_BLOCK)  # (4, T) ou None  # <<< CHANGEMENT
+            mono[inst] = arr
+            presence.append(arr is not None)
+        presence = np.array(presence, dtype=bool)
+
+        # tailles → aligner sur min T des blocs présents (ou des distances si mono manquent)
+        Ts = [mono[k].shape[1] for k in INST_ORDER if mono[k] is not None]
+        # distances globales (peuvent venir d'entrées mono ou distance-only)
+        dist_bip_cav = _first_array(inst_map.get("bipolar_to_cavitron", []), [0])  # (1,T) si distance-only
+        dist_bip_sci = _first_array(inst_map.get("bipolar_to_scissors", []), [0])
+        # si distances non trouvées via distance-only, tenter via entrées mono (lignes 6,7 du Format B)  # <<< CHANGEMENT
+        if dist_bip_cav is None or dist_bip_sci is None:
+            for inst in INST_ORDER:
+                arr = _first_array(inst_map.get(inst, []), DIST_IDX)
+                if arr is not None:
+                    if dist_bip_cav is None: dist_bip_cav = arr[[0], :]
+                    if dist_bip_sci is None and arr.shape[0] > 1: dist_bip_sci = arr[[1], :]
+
+        # collecter T possibles
+        if dist_bip_cav is not None: Ts.append(dist_bip_cav.shape[1])
+        if dist_bip_sci is not None: Ts.append(dist_bip_sci.shape[1])
+
+        if len(Ts) == 0:
+            continue
+        T = int(min(Ts))
+
+        # composer le bloc feature (12 + 2 = 14 canaux)  # <<< CHANGEMENT
+        feat_blocks = []
+        for inst in INST_ORDER:
+            if mono[inst] is not None:
+                feat_blocks.append(mono[inst][:, :T])  # (4,T)
+            else:
+                feat_blocks.append(np.zeros((4, T), dtype=float))  # <<< CHANGEMENT
+        if dist_bip_cav is None: dist_bip_cav = np.zeros((1, T), dtype=float)
+        else:                      dist_bip_cav = dist_bip_cav[:, :T]
+        if dist_bip_sci is None: dist_bip_sci = np.zeros((1, T), dtype=float)
+        else:                     dist_bip_sci = dist_bip_sci[:, :T]
+
+        feats_CxT = np.vstack(feat_blocks + [dist_bip_cav, dist_bip_sci])  # (14, T)  # <<< CHANGEMENT
+        feats_CxT_cln = clean_trial_CxT_no_norm(feats_CxT)
+
+        # label (on prend le premier niveau valide rencontré dans les entrées de ce trial)
+        lvl9 = None
+        for inst in list(INST_ORDER) + ["bipolar_to_cavitron", "bipolar_to_scissors"]:
+            it_list = inst_map.get(inst, [])
+            lvl9 = _level_from_any(it_list)
+            if lvl9 is not None:
+                break
         if lvl9 is None or lvl9 not in LEVEL_TO_IDX:
             continue
 
-        data = to_array_CxT(it["data"])  # (C,T)
-        C,T = data.shape
+        # infos
+        co, pgy, rmask = to_coarse_and_pgy(lvl9)
 
-        if kept_idx is None:
-            if ch_names_meta and len(ch_names_meta) == C:
-                kept_idx = select_feature_indices(ch_names_meta)
-                kept_names = [ch_names_meta[i] for i in kept_idx]
-            else:
-                kept_idx = list(range(2, C))
-                kept_names = [f"feat_{i}" for i in kept_idx]
-            if not kept_idx:
-                raise ValueError("No features found to keep.")
-            print("→ Features used:", kept_names)
-
-        feats = data[kept_idx, :]
-        C2,T2 = feats.shape
-        if T2 < L:
-            continue
-
-        feats_raw = feats.copy()
-        feats_cln = clean_trial_CxT_no_norm(feats)
-
-        pid  = str(it.get("participant","unk"))
-        trid = f"{pid}__{str(it.get('trial','t0'))}"
-        inst = str(it.get("instrument", "unknown"))
-
-        for start in range(0, T2-L+1, hop):
-            seg_raw = feats_raw[:, start:start+L]
+        # fenêtrage
+        for start in range(0, T-L+1, hop):
+            seg_raw = feats_CxT[:, start:start+L]
             zero_ratio = float((seg_raw == 0).sum()) / float(seg_raw.size)
             if zero_ratio >= ZERO_RATIO_THRESHOLD:
-                continue  # trop de zéros → bruit/masques
-
-            seg = feats_cln[:, start:start+L]
-            X.append(seg.T.astype(np.float32))  # [L,C]
+                continue
+            seg = feats_CxT_cln[:, start:start+L]
+            X.append(seg.T.astype(np.float32))  # [L, C]
             y9.append(LEVEL_TO_IDX[lvl9])
-            co, pgy, rmask = to_coarse_and_pgy(lvl9)
             yco.append(co if (co is not None and 0<=co<4) else -1)
             ypgy.append(pgy if (0<=pgy<6) else -1)
             yresmask.append(rmask)
-            parts.append(pid); trials.append(trid); starts.append(start); inst_ids.append(inst)
+            parts.append(pid)
+            trials.append(f"{pid}__{tr}")
+            starts.append(start)
+            inst_presence.append(presence.copy())
+            inst_combo.append("|".join([INST_ORDER[i] for i,b in enumerate(presence) if b]))
 
     if not X:
         raise ValueError("No windows built. Check filters and L/HOP.")
@@ -250,17 +325,18 @@ def build_windows_dataset(items, L=100, hop=100, meta_path=None):
     parts = np.asarray(parts, object)
     trials= np.asarray(trials, object)
     starts= np.asarray(starts, np.int32)
-    inst_ids = np.asarray(inst_ids, object)
+    inst_presence = np.asarray(inst_presence, dtype=bool)  # shape: [N,3]
+    inst_combo = np.asarray(inst_combo, object)
 
     # Trace des métriques conservées
-    map_path = os.path.join(OUT_DIR, "metrics_used_full.txt")
+    map_path = os.path.join(OUT_DIR, "metrics_used_full_multi.txt")
     with open(map_path, "w", encoding="utf-8") as f:
         f.write("Index\tMetric name\n")
         for i, nm in enumerate(kept_names):
             f.write(f"{i}\t{nm}\n")
 
     print(f"Windows built = {len(X)} | L={L} | C={X.shape[2]} | classes=9")
-    return X,y9,yco,ypgy,yresmask,parts,trials,starts,inst_ids, kept_names
+    return X,y9,yco,ypgy,yresmask,parts,trials,starts,inst_presence,inst_combo, kept_names
 
 def to_categorical_int(y, n):
     Y = np.zeros((len(y), n), dtype=np.float32)
@@ -390,30 +466,28 @@ def plot_heatmap_individuals(pred_counts, row_labels, col_labels, outpath, title
     plt.yticks(yt, row_labels)
     plt.colorbar(); plt.tight_layout(); plt.savefig(outpath, dpi=150); plt.close()
 
-# ---- NEW: Confusions par instrument ----
-def save_confusions_by_instrument(y_true_all: np.ndarray,
-                                  y_pred_all: np.ndarray,
-                                  inst_ids_all: np.ndarray,
-                                  tag: str,
-                                  out_dir: str = OUT_DIR):
+# ---- Confusions par instrument (présence dans la fenêtre) ---
+def save_confusions_by_instrument_presence(y_true_all: np.ndarray,
+                                           y_pred_all: np.ndarray,
+                                           inst_presence_all: np.ndarray,
+                                           tag: str,
+                                           out_dir: str = OUT_DIR):
     """
-    Sauvegarde une matrice de confusion par instrument.
-    Fichiers: confusion_windows_{tag}_inst-{instrument}.png
+    inst_presence_all: [N,3] bool → colonnes = [bipolar, scissors, cavitron]
+    On produit une matrice de confusion par instrument, en ne gardant que
+    les fenêtres où l'instrument est présent (au moins un canal non-zero dans son bloc).
     """
-    present_insts = sorted(list({str(x) for x in inst_ids_all}))
-    if len(present_insts) == 0:
-        print("[warn] Aucun instrument détecté pour", tag)
-        return
-    for inst in present_insts:
-        idx = np.where(inst_ids_all == inst)[0]
+    for j, inst in enumerate(INST_ORDER):
+        idx = np.where(inst_presence_all[:, j])[0]
         if len(idx) == 0:
+            print(f"[{tag}] Aucun window avec instrument={inst}")
             continue
         y_t = y_true_all[idx]
         y_p = y_pred_all[idx]
         cf  = confusion_matrix_np(y_t, y_p, n_classes=len(LEVEL9_ORDER))
         out = os.path.join(out_dir, f"confusion_windows_{tag}_inst-{inst}.png")
         plot_confusion(cf, LEVEL9_ORDER, outpath=out, title=f"Confusion — {tag} — instrument={inst}")
-        print(f"[{tag}] confusion par instrument sauvée → {out}")
+        print(f"[{tag}] confusion (présence) par instrument sauvée → {out}")
 
 # ------------- Majority helpers -------------
 def majority_aggregate(y_pred: np.ndarray, ids: np.ndarray) -> Dict[str,int]:
@@ -433,8 +507,7 @@ def mode_true_by_entity(y_true: np.ndarray, ids: np.ndarray) -> Dict[str,int]:
 def dict_to_arrays(d_pred: Dict[str,int], d_true: Dict[str,int]):
     ents = sorted(set(d_pred.keys()) & set(d_true.keys()))
     yhat = np.array([d_pred[e] for e in ents], dtype=np.int32)
-    ytru = np.array([d_true[e] for e in ents], dtype=np.int32
-    )
+    ytru = np.array([d_true[e] for e in ents], dtype=np.int32)
     return ents, ytru, yhat
 
 # ------------- Main (LOOCV by trials) -------------
@@ -442,11 +515,15 @@ def main():
     print(f"📁 Loading: {DATA_PATH}")
     items = load_items(DATA_PATH)
     (X_raw, y9, yco_idx, ypgy_idx, yresmask,
-     part_ids, trial_ids, start_idx, inst_ids, kept_names) = build_windows_dataset(
-        items, L=SEQ_LEN, hop=HOP, meta_path=META_PATH
+     part_ids, trial_ids, start_idx, inst_presence, inst_combo, kept_names) = build_windows_dataset_multi(
+        items, L=SEQ_LEN, hop=HOP
     )
     N,L,C = X_raw.shape
-    print(f"→ Final features (C={C}): {kept_names}")
+    print(f"→ Final features (C={C}):")
+    for i,nm in enumerate(kept_names):
+        if i < 5 or i >= C-5:  # échantillon
+            print(f"  {i:03d}: {nm}")
+    print(f"... total {C} canaux")
 
     # Holders OOF
     oof_pred9 = np.zeros(N, np.int32)
@@ -576,18 +653,19 @@ def main():
 
     save_report_and_plots("oof", y9, oof_pred9, ids_for_heatmap=part_ids)
 
-    # ➜ Matrices de confusion par instrument (OOF)
-    save_confusions_by_instrument(
-        y_true_all=y9, y_pred_all=oof_pred9, inst_ids_all=inst_ids, tag="oof"
+    # ➜ Matrices de confusion par instrument (présence dans la fenêtre)
+    save_confusions_by_instrument_presence(
+        y_true_all=y9, y_pred_all=oof_pred9, inst_presence_all=inst_presence, tag="oof"
     )
 
     # CSV (windows OOF avec proba)
     win_csv = os.path.join(OUT_DIR,"pred_windows_oof.csv")
     with open(win_csv,"w",encoding="utf-8") as f:
-        header=["fold","participant","trial","start","instrument","true9","pred9"]+[f"p_{c}" for c in LEVEL9_ORDER]
+        header=["fold","participant","trial","start","inst_combo","true9","pred9"]+[f"p_{c}" for c in LEVEL9_ORDER]
         f.write(",".join(header)+"\n")
         for i in range(len(y9)):
-            row=[str(int(fold_id[i])), str(part_ids[i]), str(trial_ids[i]), str(int(start_idx[i])), str(inst_ids[i]),
+            row=[str(int(fold_id[i])), str(part_ids[i]), str(trial_ids[i]), str(int(start_idx[i])),
+                 str(inst_combo[i]),
                  LEVEL9_ORDER[int(y9[i])], LEVEL9_ORDER[int(oof_pred9[i])]] + [f"{float(oof_prob9[i,j]):.6f}" for j in range(9)]
             f.write(",".join(row)+"\n")
 
@@ -596,24 +674,6 @@ def main():
     group_predictions_by_trial(win_csv)
 
     # Participant-level (majorité) à partir de l’OOF
-    def majority_aggregate(y_pred: np.ndarray, ids: np.ndarray) -> Dict[str,int]:
-        out = {}
-        for ent in np.unique(ids):
-            cls, cnt = np.unique(y_pred[ids==ent], return_counts=True)
-            out[ent] = int(cls[np.argmax(cnt)])
-        return out
-    def mode_true_by_entity(y_true: np.ndarray, ids: np.ndarray) -> Dict[str,int]:
-        out = {}
-        for ent in np.unique(ids):
-            cls, cnt = np.unique(y_true[ids==ent], return_counts=True)
-            out[ent] = int(cls[np.argmax(cnt)])
-        return out
-    def dict_to_arrays(d_pred: Dict[str,int], d_true: Dict[str,int]):
-        ents = sorted(set(d_pred.keys()) & set(d_true.keys()))
-        yhat = np.array([d_pred[e] for e in ents], dtype=np.int32)
-        ytru = np.array([d_true[e] for e in ents], dtype=np.int32)
-        return ents, ytru, yhat
-
     d_pred_part = majority_aggregate(oof_pred9, part_ids)
     d_true_part = mode_true_by_entity(y9, part_ids)
     ents, ytrue_part, ypred_part = dict_to_arrays(d_pred_part, d_true_part)

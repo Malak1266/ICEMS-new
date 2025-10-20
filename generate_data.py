@@ -194,7 +194,8 @@ def build_dataset(full_json, out_pkl, out_meta):
                     dist_bip_cav = _zeros(L)
                     dist_bip_sci = np.where(mask, dist, 0.0)
 
-                rows = [Xp, Yp, Zp, pos_mag, vel, acc, jerk, dist_bip_cav, dist_bip_sci]
+                rows = [pos_mag, vel, acc, jerk, dist_bip_cav, dist_bip_sci]
+
                 label_row_exp = np.full(L, y_exp, dtype=float)
                 label_row_lvl = np.full(L, y_lvl, dtype=float)
                 M = np.vstack([label_row_exp, label_row_lvl] + [np.asarray(r, dtype=float) for r in rows])
@@ -327,9 +328,6 @@ def build_dataset(full_json, out_pkl, out_meta):
     metric_names = [
         "Label(Expertise)",
         "Label(Level)",
-        "X Position",
-        "Y Position",
-        "Z Position",
         "Position Magnitude",
         "Velocity",
         "Acceleration",
