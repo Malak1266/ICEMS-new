@@ -1,97 +1,18 @@
-# Environnement virtuel Python
-surgical_expertise_env/
-
-# Gros fichiers de données (>50MB)
-data/raw_data.json
-data/full_data.json
-data/filtered_data.json
-data/final_data_normalized_with_levels.pkl
-data/final_data_normalized_with_levels_original.pkl
-data/*.pkl
-data/*.json
-
-# Fichiers d'analyse des données manquantes
-data/missing_data.json
-
-# Résultats d'analyse
-analyse_missing_data_result/
-runs_cv_by_trials_fullmetrics/
+﻿*.npy
+*.pkl
 *.csv
-*.png
-
-# Fichiers Python
+*.h5
+*.pt
+*.pth
+pipeline_output*/
+dataset/
+data/*.npy
+data/*.pkl
+logs/
+results/
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# Environnements
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# IDE
-.vscode/
-.idea/
-
-# OS
+*.pyc
+.venv/
+surgical_expertise_env/
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log
-
-# Temporary files
-*.tmp
-*.temp
