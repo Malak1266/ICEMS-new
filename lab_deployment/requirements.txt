@@ -1,0 +1,8 @@
+# Dépendances pour le PC du laboratoire (collecte + traitement Atracsys uniquement).
+# Pas besoin de tensorflow/keras ici : ces packages servent à l'entraînement
+# du modèle qui se fait sur le PC principal ou Narval, pas au labo.
+
+numpy>=1.24,<2.0
+pandas>=2.0
+scipy>=1.10
+matplotlib>=3.7
