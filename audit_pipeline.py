@@ -142,8 +142,9 @@ def inventory(repo: Path, R: Report):
 def tensor_version(repo: Path, R: Report):
     R.h("[B] Version du tenseur utilisee (confond captured_flag v1)")
     hits = {"1": [], "2": []}
+    continuous_hits = []
     for f in repo.rglob("*.py"):
-        if any(x in f.parts for x in (".git", ".venv", "node_modules")):
+        if any(x in f.parts for x in (".git", ".venv", "node_modules")) or f.name == "audit_pipeline.py":
             continue
         try:
             txt = f.read_text(encoding="utf-8", errors="ignore")
@@ -151,19 +152,31 @@ def tensor_version(repo: Path, R: Report):
             continue
         for m in TENSOR_PAT.finditer(txt):
             hits[m.group(1)].append(str(f.relative_to(repo)))
+        if "continuous_per_trial.pkl" in txt:
+            continuous_hits.append(str(f.relative_to(repo)))
     for v in ("1", "2"):
         if hits[v]:
             R.p(f"\n**v{v}** reference dans :")
             for f in sorted(set(hits[v])):
                 R.p(f"- `{f}`")
+    if continuous_hits:
+        R.p("\n**continuous_per_trial.pkl** (pipeline extremes Option A) reference dans :")
+        for f in sorted(set(continuous_hits))[:20]:
+            R.p(f"- `{f}`")
     if hits["1"] and hits["2"]:
         R.check("B1", "Version tenseur unique", "FAIL",
                 "v1 ET v2 coexistent — les figures ne sont pas comparables")
-    elif hits["1"]:
+    elif hits["1"] and not continuous_hits:
         R.check("B1", "Version tenseur unique", "FAIL",
                 "v1 seul : confond activite/detection non corrige")
-    elif hits["2"]:
+    elif hits["2"] and not hits["1"]:
         R.check("B1", "Version tenseur unique", "PASS", "v2 partout")
+    elif continuous_hits and not hits["1"]:
+        R.check("B1", "Version tenseur unique", "PASS",
+                "continuous_per_trial.pkl (pipeline extremes)")
+    elif hits["1"] and continuous_hits:
+        R.check("B1", "Version tenseur unique", "FAIL",
+                "v1 et continuous_per_trial coexistent")
     else:
         R.check("B1", "Version tenseur unique", "INCONNU", "aucune reference trouvee")
 
