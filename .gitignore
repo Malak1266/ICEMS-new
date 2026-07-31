@@ -87,3 +87,29 @@ runA_nohoel_barres.pdf
 runA_nohoel_barres.png
 runA_nohoel_boxplot.pdf
 runA_nohoel_boxplot.png
+
+# ---- Brouillons de test (scripts exploratoires, pas de vrais tests unitaires) ----
+test copy.py
+test.py
+test_build_windows.py
+test_sliding_windows.py
+test_train_windows.py
+test_train_proper.py
+
+# ---- Modeles entraines et sorties (regenerables) ----
+*.keras
+results_continuous/
+artifacts/
+
+# ---- Documents generes ----
+*.docx
+docs/*.pdf
+
+# ---- Notes internes / journaux de travail dates ----
+EXPERIMENT_LOG.md
+SESSION_RECAP_*.md
+avancement_icems.md
+STEP_A_B_RECAP.md
+PROJECT_PROGRESSION.md
+docs/PROVENANCE.md
+docs/PROVENANCE_FIGURES.md
