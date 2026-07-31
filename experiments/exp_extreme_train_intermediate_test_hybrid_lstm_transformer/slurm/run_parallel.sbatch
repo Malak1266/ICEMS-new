@@ -18,19 +18,16 @@
 #SBATCH --job-name=icems_ext_int
 #SBATCH --output=experiments/exp_extreme_train_intermediate_test_hybrid_lstm_transformer/logs/parallel-%A_%a.out
 #SBATCH --error=experiments/exp_extreme_train_intermediate_test_hybrid_lstm_transformer/logs/parallel-%A_%a.err
-#SBATCH --time=00:45:00
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
-#SBATCH --gres=gpu:1
+#SBATCH --time=03:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:a100:1
 #SBATCH --array=0-4%5
-# Note: time/mem reduits pour priorite file (run ~3-15 min/seed). GPU generique = plus de slots.
 
 set -euo pipefail
 export PYTHONUNBUFFERED=1
 
 SMOKE="${SMOKE:-0}"
-# USE_HOEL=0 → MSE plate (Run A / protocole papier). Defaut 1 = HOEL.
-USE_HOEL="${USE_HOEL:-1}"
 ROOT="${SLURM_SUBMIT_DIR:-$HOME/ICEMS-main}"
 EXP="experiments/exp_extreme_train_intermediate_test_hybrid_lstm_transformer"
 SEEDS=(42 123 456 789 2024)
@@ -47,7 +44,6 @@ echo " Seed    : ${SEED}"
 echo " Node    : ${SLURMD_NODENAME:-local}"
 echo " ROOT    : ${ROOT}"
 echo " SMOKE   : ${SMOKE}"
-echo " USE_HOEL: ${USE_HOEL}"
 echo " Date    : $(date)"
 echo "============================================================"
 
@@ -85,12 +81,7 @@ if [[ "$SMOKE" == "1" ]]; then
     SMOKE_FLAG=(--smoke)
 fi
 
-HOEL_FLAG=()
-if [[ "$USE_HOEL" == "0" ]]; then
-    HOEL_FLAG=(--no-hoel)
-fi
-
-python -u "${EXP}/run_experiment.py" --seed "${SEED}" "${SMOKE_FLAG[@]}" "${HOEL_FLAG[@]}"
+python -u "${EXP}/run_experiment.py" --seed "${SEED}" "${SMOKE_FLAG[@]}"
 
 echo "============================================================"
 echo " Termine seed=${SEED}"

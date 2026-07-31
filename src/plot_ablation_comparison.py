@@ -5,7 +5,7 @@ Figure comparative A vs B pour slide / rapport (ablation MAE).
 
 Usage :
     python src/plot_ablation_comparison.py --ablation-dir results/ablation_aug
-    python src/plot_ablation_comparison.py --ablation-dir "<chemin-local>/results/ablation_aug"
+    python src/plot_ablation_comparison.py --ablation-dir "C:/Users/malek/Downloads/results/ablation_aug"
 """
 from __future__ import annotations
 

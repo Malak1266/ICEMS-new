@@ -54,47 +54,11 @@ def load_seeds(pattern: str) -> pd.DataFrame:
 
 
 def average_seeds(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    1 ligne = 1 participant.
-    - Extrêmes : split train uniquement (ignore val → pas de double comptage)
-    - Intermédiaires : split test
-    - Moyenne des essais dans chaque seed, puis moyenne inter-seeds
-    """
-    pref = {"Novice": "train", "Expert": "train", "Junior": "test", "Senior": "test"}
-    parts = []
-    for g, sp in pref.items():
-        sub = df[(df.group == g) & (df.split == sp)]
-        if sub.empty:
-            sub = df[df.group == g]
-            if not sub.empty:
-                print(f"[warn] {g}: split '{sp}' absent → fallback tous splits")
-        parts.append(sub)
-    df = pd.concat(parts, ignore_index=True)
-
-    n_seed_files = int(df["seed_file"].nunique())
-    # essais → 1 score / (seed, participant)
-    per_seed = (
-        df.groupby(["seed_file", "participant", "group"], as_index=False)
-          .agg(raw_score=("raw_score", "mean"))
-    )
-    # seeds → 1 score / participant
-    g = (
-        per_seed.groupby(["participant", "group"], as_index=False)
-          .agg(raw_score=("raw_score", "mean"),
-               sd_seeds=("raw_score", "std"),
-               n_seeds=("raw_score", "size"))
-    )
+    g = (df.groupby(["participant", "group", "split"], as_index=False)
+           .agg(raw_score=("raw_score", "mean"),
+                sd_seeds=("raw_score", "std"),
+                n_seeds=("raw_score", "size")))
     g["sd_seeds"] = g["sd_seeds"].fillna(0.0)
-    g["split"] = g["group"].map(pref)
-    g["n_seeds"] = n_seed_files  # afficher le vrai nombre de fichiers seed
-    print(
-        f"etape  essais->participant/seed : {len(per_seed)} lignes ; "
-        f"seeds->participant : {len(g)} lignes"
-    )
-    for grp in GROUPS:
-        n = int((g.group == grp).sum())
-        exp = {"Novice": 14, "Junior": 14, "Senior": 11, "Expert": 8}.get(grp)
-        print(f"  {grp:<8} n={n}" + (f" (attendu {exp})" if exp else ""))
     print(f"Ecart-type inter-seeds moyen : {g.sd_seeds.mean():.4f} "
           f"(bruit d'optimisation elimine par le moyennage)")
     return g
@@ -133,9 +97,8 @@ def report(df: pd.DataFrame, path: str, calib: str) -> str:
     A = L.append
     A("RAPPORT — dispersion, ordinalite, contrastes")
     A("=" * 62)
-    A(f"calibration       : {calib}")
-    A(f"unite statistique : participant (n={df.participant.nunique()})")
-    A(f"seeds moyennees   : {int(df.n_seeds.max())}")
+    A(f"calibration : {calib}")
+    A(f"seeds moyennees : {int(df.n_seeds.max())}")
     A(f"ecart-type inter-seeds moyen : {df.sd_seeds.mean():.4f}")
     A("")
     A("Par groupe (le nerf de la guerre = SD intra-classe)")
@@ -209,13 +172,6 @@ def figures(df: pd.DataFrame, out: str, calib: str):
     present = [g for g in GROUPS if (df.group == g).any()]
     data = [df.loc[df.group == g, "score"].values for g in present]
     nseed = int(df.n_seeds.max())
-    n_part = int(df.participant.nunique())
-    counts = {g: int((df.group == g).sum()) for g in present}
-    count_s = "/".join(str(counts[g]) for g in present)
-    subtitle = (
-        f"{nseed} seeds · n={n_part} participants "
-        f"({count_s}) · calibration = {calib}"
-    )
 
     means, half = [], []
     for v in data:
@@ -231,8 +187,9 @@ def figures(df: pd.DataFrame, out: str, calib: str):
     ax.set_ylim(-1, 1); ax.set_yticks(np.arange(-1, 1.01, 0.5))
     ax.set_ylabel("Score d'expertise")
     fig.subplots_adjust(top=0.84, left=0.16, right=0.96, bottom=0.11)
-    fig.suptitle("Score moyen par niveau", y=0.965, fontsize=12.5)
-    fig.text(0.5, 0.90, subtitle, ha="center", fontsize=9.5, color="#666", style="italic")
+    fig.suptitle("Score moyen par niveau — Hybrid 1", y=0.965, fontsize=12.5)
+    fig.text(0.5, 0.90, f"moyenne de {nseed} seeds · calibration = {calib}",
+             ha="center", fontsize=9.5, color="#666", style="italic")
     fig.savefig(f"{out}_barres.pdf"); fig.savefig(f"{out}_barres.png", dpi=300)
     plt.close(fig)
 
@@ -252,12 +209,12 @@ def figures(df: pd.DataFrame, out: str, calib: str):
     ax.set_ylim(-1, 1); ax.set_yticks(np.arange(-1, 1.01, 0.5))
     ax.set_ylabel("Score d'expertise")
     fig.subplots_adjust(top=0.84, left=0.16, right=0.96, bottom=0.11)
-    fig.suptitle("Distribution par niveau", y=0.965, fontsize=12.5)
-    fig.text(0.5, 0.90, subtitle, ha="center", fontsize=9.5, color="#666", style="italic")
+    fig.suptitle("Distribution des scores par niveau — Hybrid 1", y=0.965, fontsize=12.5)
+    fig.text(0.5, 0.90, f"moyenne de {nseed} seeds · calibration = {calib}",
+             ha="center", fontsize=9.5, color="#666", style="italic")
     fig.savefig(f"{out}_boxplot.pdf"); fig.savefig(f"{out}_boxplot.png", dpi=300)
     plt.close(fig)
     print(f"figures : {out}_barres.pdf/.png  et  {out}_boxplot.pdf/.png")
-    print(f"  subtitle : {subtitle}")
 
 
 def main():

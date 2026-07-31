@@ -1,115 +1,18 @@
-﻿# ---- Python ----
-__pycache__/
-*.py[cod]
-*.egg-info/
-.ipynb_checkpoints/
-
-# ---- Environnements virtuels ----
-.venv/
-venv/
-env/
-surgical_expertise_env/
-
-# ---- Données lourdes / binaires (restent en local, jamais dans Git) ----
+﻿*.npy
 *.pkl
-*.npy
-*.npz
-*.h5
 *.csv
-*.tsv
-*.parquet
-data/*.json
-# exception : on garde les petits fichiers "meta" descriptifs
-!data/*_meta.json
-
-# ---- Checkpoints de modèles ----
+*.h5
 *.pt
 *.pth
-*.ckpt
-
-# ---- Archives ----
-*.zip
-*.tar
-*.tar.gz
-*.gz
-
-# ---- Sorties d'expériences (régénérables) ----
-results/
-results_continuous/
-results_from_narval/
-runs/
-presentation_png/
 pipeline_output*/
-
-# ---- Logs & fichiers temporaires ----
+dataset/
+data/*.npy
+data/*.pkl
 logs/
-*.log
-_tmp_*
-debug-*.log
-
-# ---- OS ----
+results/
+__pycache__/
+*.pyc
+.venv/
+surgical_expertise_env/
 .DS_Store
 Thumbs.db
-
-# ---- Scripts jetables / diagnostic ponctuel (gardes en local, hors depot) ----
-compare_fig7.py
-compare_hybrid1_v1_v2.py
-diag_scissors.py
-generate_composite_figure.py
-inspect_results.py
-preproc_audit.py
-src/diagnose_senior_expert.py
-src/enrich_baseline_pkl.py
-src/eval/check_augmentation.py
-src/eval/inspect_predictions.py
-scripts/diagnose_trial_lengths.py
-scripts/generate_architecture_diagrams.py
-scripts/generate_hoel_diagrams.py
-scripts/generate_hybrid_slide_diagram.py
-scripts/generate_presentation_icems.py
-scripts/generate_study_workflow.py
-scripts/make_runA_compatible_figures.py
-scripts/plot_hybrid1_temporal.py
-scripts/plot_optionA_temporal.py
-scripts/generate_hoel_figures.sh
-
-# ---- Documentation interne (notes de travail, hors depot public) ----
-BASELINE_RESULTATS_ET_FIGURES.md
-GUIDE_PROJET.md
-SYNTHESE_PROJET_ICEMS.md
-mae_protocol_audit.md
-docs/RAPPORT_TOP3_CONTRIBUTIONS.md
-
-# ---- Sorties generees (presentations, figures de racine) ----
-*.pptx
-figures/
-runA_nohoel_barres.pdf
-runA_nohoel_barres.png
-runA_nohoel_boxplot.pdf
-runA_nohoel_boxplot.png
-
-# ---- Brouillons de test (scripts exploratoires, pas de vrais tests unitaires) ----
-test copy.py
-test.py
-test_build_windows.py
-test_sliding_windows.py
-test_train_windows.py
-test_train_proper.py
-
-# ---- Modeles entraines et sorties (regenerables) ----
-*.keras
-results_continuous/
-artifacts/
-
-# ---- Documents generes ----
-*.docx
-docs/*.pdf
-
-# ---- Notes internes / journaux de travail dates ----
-EXPERIMENT_LOG.md
-SESSION_RECAP_*.md
-avancement_icems.md
-STEP_A_B_RECAP.md
-PROJECT_PROGRESSION.md
-docs/PROVENANCE.md
-docs/PROVENANCE_FIGURES.md

@@ -10,13 +10,9 @@ Schéma (ordre STRICT du supplément / eApp 1) :
       → Linear(128 → d_model=64)                                 (B, L, 64)
       → + pos_embedding APPRENABLE (max_len, 64), tronqué à L
       → 1 × TransformerBlock(d_model=64, n_heads=4, key_dim=32, ff_dim=128)
-      → Pooling (défaut : Masked GAP ; option : AttentionPooling1D)  (B, 64|H*64)
-      → Linear(pool_dim → 32) → ReLU → Dropout(0.30) → Linear(32 → 1) → Tanh
+      → Masked GlobalAveragePooling (ignore padding)             (B, 64)
+      → Linear(64 → 32) → ReLU → Dropout(0.30) → Linear(32 → 1) → Tanh
     Output (B, 1) dans [-1, 1]
-
-Pooling (extension méthodologique SPIE / perspectives) :
-    pool_type ∈ {"gap", "max", "attn"} — défaut "gap" = reproduction A0 bit-identique
-    (appelle masked_mean, aucun paramètre d'attention). Voir attention_pooling.py.
 
 Point d'attention (key_dim=32 != d_model/n_heads=16) :
     L'attention multi-têtes est implémentée MANUELLEMENT (Q/K/V séparés) car la
@@ -31,14 +27,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal
 
 import torch
 import torch.nn as nn
-
-from src.models.attention_pooling import AttentionPooling1D, masked_max, time_shuffle
-
-PoolType = Literal["gap", "max", "attn"]
 
 
 def _make_sinusoidal_pe(seq_len: int, d_model: int) -> torch.Tensor:
@@ -63,14 +54,6 @@ class Hybrid1Config:
     key_dim: int = 32
     ff_dim: int = 128
     dropout: float = 0.30
-    # --- pooling (défaut = reproduction A0) ---
-    pool_type: PoolType = "gap"
-    pool_heads: int = 1
-    pool_d_attn: int | None = None  # None → d_model
-    pool_tau: float = 1.0
-    pool_att_dropout: float = 0.0
-    # contrôle A6 : permute les timesteps juste avant le pooling (train+eval)
-    pool_time_shuffle: bool = False
 
 
 class TransformerBlock(nn.Module):
@@ -204,11 +187,6 @@ class Hybrid1EVICEMS(nn.Module):
         self.n_features = cfg.n_features
         self.max_len = cfg.max_len
         self.d_model = cfg.d_model
-        self.pool_type: PoolType = cfg.pool_type
-        self.pool_time_shuffle = bool(cfg.pool_time_shuffle)
-
-        if cfg.pool_type not in ("gap", "max", "attn"):
-            raise ValueError(f"pool_type invalide: {cfg.pool_type!r}")
 
         self.lstm = nn.LSTM(
             cfg.n_features, cfg.lstm_hidden, num_layers=1, batch_first=True,
@@ -227,39 +205,13 @@ class Hybrid1EVICEMS(nn.Module):
             dropout=cfg.dropout,
         )
 
-        # Attention pooling uniquement si demandé (sinon aucun paramètre ajouté → A0)
-        self.attn_pool: AttentionPooling1D | None = None
-        if cfg.pool_type == "attn":
-            self.attn_pool = AttentionPooling1D(
-                d_model=cfg.d_model,
-                d_attn=cfg.pool_d_attn,
-                heads=cfg.pool_heads,
-                temperature=cfg.pool_tau,
-                att_dropout=cfg.pool_att_dropout,
-            )
-            pool_dim = self.attn_pool.out_dim
-        else:
-            pool_dim = cfg.d_model
-
         self.head = nn.Sequential(
-            nn.Linear(pool_dim, 32),
+            nn.Linear(cfg.d_model, 32),
             nn.ReLU(),
             nn.Dropout(cfg.dropout),
             nn.Linear(32, 1),
             nn.Tanh(),
         )
-
-    def _pool(
-        self,
-        h: torch.Tensor,
-        key_padding_mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        if self.pool_type == "gap":
-            return masked_mean(h, key_padding_mask)
-        if self.pool_type == "max":
-            return masked_max(h, key_padding_mask)
-        assert self.attn_pool is not None
-        return self.attn_pool(h, key_padding_mask=key_padding_mask)
 
     def forward(
         self,
@@ -278,12 +230,7 @@ class Hybrid1EVICEMS(nn.Module):
         h = self.proj(h)
         h = h + self.pos_embedding[:L].unsqueeze(0)
         h = self.transformer(h, key_padding_mask=key_padding_mask)
-
-        # Contrôle A6 : détruit l'ordre temporel juste avant le pooling
-        if self.pool_time_shuffle:
-            h, key_padding_mask = time_shuffle(h, key_padding_mask)
-
-        pooled = self._pool(h, key_padding_mask)
+        pooled = masked_mean(h, key_padding_mask)
         out = self.head(pooled)
 
         assert out.shape == (B, 1), f"sortie {tuple(out.shape)} != {(B, 1)}"
@@ -316,30 +263,3 @@ if __name__ == "__main__":
     assert model.transformer.key_dim == 32
     print("Positional embedding APPRENABLE : OK")
     print("MHA custom key_dim=32 : OK")
-
-    # Non-régression : pool_type=gap n'ajoute aucun paramètre d'attention
-    assert model.attn_pool is None
-    assert not any("attn_pool" in n for n in param_names)
-
-    # Attention pooling : shapes + params
-    cfg_attn = Hybrid1Config(n_features=1, max_len=5000, pool_type="attn", pool_heads=1)
-    m_attn = Hybrid1EVICEMS(cfg_attn)
-    out_a = m_attn(x, key_padding_mask=pad)
-    assert out_a.shape == (B, 1)
-    assert m_attn.attn_pool is not None
-    n_extra = count_params(m_attn) - count_params(model)
-    assert n_extra == 4224, f"params attention attendus 4224, got {n_extra}"
-    print(f"Attention pooling : OK (+{n_extra} params)")
-
-    # Bit-identité GAP : deux modèles gap, mêmes poids → même sortie
-    torch.manual_seed(0)
-    m1 = Hybrid1EVICEMS(Hybrid1Config(n_features=1, max_len=5000, pool_type="gap"))
-    m2 = Hybrid1EVICEMS(Hybrid1Config(n_features=1, max_len=5000, pool_type="gap"))
-    m2.load_state_dict(m1.state_dict())
-    m1.eval()
-    m2.eval()
-    with torch.no_grad():
-        y1 = m1(x, key_padding_mask=pad)
-        y2 = m2(x, key_padding_mask=pad)
-    assert torch.equal(y1, y2), "pool_type=gap non-régression échouée"
-    print("Non-régression pool_type=gap : OK")

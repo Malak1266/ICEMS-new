@@ -10,7 +10,7 @@
 # Variables optionnelles (override à la soumission) :
 #   sbatch --export=ALL,AUG_TARGET=100,MAX_FOLDS=5 scripts/narval/run_scaled_lopo.sbatch
 # =============================================================================
-#SBATCH --account=def-hgueziri
+#SBATCH --account=REPLACE_WITH_YOUR_ACCOUNT    # ex. def-abc12 ou rrg-xyz45
 #SBATCH --job-name=icems_scaled
 #SBATCH --output=logs/icems_scaled-%j.out
 #SBATCH --error=logs/icems_scaled-%j.err
@@ -39,7 +39,7 @@ mkdir -p logs results
 module purge
 module load StdEnv/2023
 module load python/3.11
-module load cuda/12.2
+# module load cuda/12.2   # décommenter si PyTorch CUDA installé
 
 source .venv/bin/activate
 
@@ -85,9 +85,5 @@ echo " ✅ Terminé — résultats dans : $OUT_DIR"
 echo "   - lopo_predictions.pkl"
 echo "   - confusion_matrix.png"
 echo "   - scatter.png"
-echo "   - score_vs_time_9sublevels.png"
-echo "   - score_vs_time_9sublevels_grid.png"
-echo ""
-echo " Analyse sous-niveaux (violons + Spearman) :"
-echo "   python src/sublevel_analysis.py --preds $OUT_DIR/lopo_predictions.pkl --out $OUT_DIR/sublevel"
+echo "   - score_vs_time.png"
 echo "============================================================"

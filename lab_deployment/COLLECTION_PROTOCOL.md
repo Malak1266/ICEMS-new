@@ -76,7 +76,7 @@
    - Probability Threshold : `0.7` (plus permissif que les 0.9 actuels, on filtre ensuite côté Python)
 5. **Settings → Recording** :
    - Format : `CSV` (export `*_Fiducial.csv`)
-   - Output Directory : `~/dataset/<YYYY-MM-DD>/generic/<motion>/<rep>/`
+   - Output Directory : `C:/Users/malek/Downloads/dataset/<YYYY-MM-DD>/generic/<motion>/<rep>/`
 
 ### 2.2 Vérification de la fréquence effective
 

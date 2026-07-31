@@ -15,7 +15,7 @@ Depuis votre machine locale (PowerShell / WSL / Git Bash) :
 
 ```bash
 # Adapter le chemin local
-scp -r "<chemin-local-vers-le-projet>" \
+scp -r "C:/Users/malek/Downloads/ICEMS-main (6)/ICEMS-main" \
     votre_cc@narval.alliancecan.ca:~/ICEMS-main
 ```
 

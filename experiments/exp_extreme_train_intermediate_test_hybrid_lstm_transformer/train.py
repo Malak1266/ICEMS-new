@@ -311,14 +311,11 @@ def run_single_experiment(
     out: Optional[Path] = None,
     pkl: Optional[Path] = None,
     csv: Optional[Path] = None,
-    use_hoel: Optional[bool] = None,
 ) -> dict:
     seed = SEED if seed is None else seed
     _set_seed(seed)
 
     train_cfg = ExpTrainConfig(seed=seed)
-    if use_hoel is not None:
-        train_cfg.use_hoel = bool(use_hoel)
     aug_cfg = ExpAugmentConfig()
     if smoke:
         train_cfg.seq_len = 512
@@ -359,14 +356,8 @@ def run_single_experiment(
         bidirectional=False,
     )
 
-    loss_name = "HOEL" if train_cfg.use_hoel else "MSE (flat, no class weighting)"
-    print(
-        f"[train] device={device} seed={seed} seq_len={train_cfg.seq_len} "
-        f"loss={loss_name}"
-    )
+    print(f"[train] device={device} seed={seed} seq_len={train_cfg.seq_len}")
     model, info = train_model(train_aug, val_extreme, hybrid_cfg, train_cfg, device)
-    info["use_hoel"] = bool(train_cfg.use_hoel)
-    info["loss"] = "hoel" if train_cfg.use_hoel else "mse"
 
     csv_path = _export_raw_scores_csv(
         model,
@@ -420,8 +411,6 @@ def run_single_experiment(
         "split": summary,
         "metrics": metrics,
         "n_augmented": n_aug,
-        "use_hoel": bool(train_cfg.use_hoel),
-        "loss": "hoel" if train_cfg.use_hoel else "mse",
     }
     with open(out_dir / "experiment_summary.json", "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)

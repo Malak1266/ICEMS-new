@@ -9,7 +9,6 @@ import json
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
 
 EXP_DIR = Path(__file__).resolve().parent
 if str(EXP_DIR) not in sys.path:
@@ -18,7 +17,7 @@ if str(EXP_DIR) not in sys.path:
 from exp_config import DEFAULT_CSV, DEFAULT_PKL, PARALLEL_SEEDS, REPO_ROOT  # noqa: E402
 
 
-def _worker(seed: int, smoke: bool, pkl: str, csv: str, use_hoel: Optional[bool]) -> dict:
+def _worker(seed: int, smoke: bool, pkl: str, csv: str) -> dict:
     if str(EXP_DIR) not in sys.path:
         sys.path.insert(0, str(EXP_DIR))
     from train import run_single_experiment
@@ -27,7 +26,6 @@ def _worker(seed: int, smoke: bool, pkl: str, csv: str, use_hoel: Optional[bool]
         smoke=smoke,
         pkl=Path(pkl),
         csv=Path(csv),
-        use_hoel=use_hoel,
     )
 
 
@@ -46,11 +44,6 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Parallel multi-seed experiment launcher")
     ap.add_argument("--seeds", type=int, nargs="*", default=list(PARALLEL_SEEDS))
     ap.add_argument("--smoke", action="store_true")
-    ap.add_argument(
-        "--no-hoel",
-        action="store_true",
-        help="MSE plate (protocole papier). Defaut: HOEL (asymetrique).",
-    )
     ap.add_argument("--workers", type=int, default=None,
                     help="Process pool size (default: min(n_seeds, cpu_count))")
     ap.add_argument("--pkl", type=Path, default=DEFAULT_PKL)
@@ -61,16 +54,12 @@ def main() -> None:
 
     seeds = args.seeds
     workers = args.workers or min(len(seeds), max(1, __import__("os").cpu_count() or 1))
-    use_hoel = False if args.no_hoel else None
-    print(
-        f"[parallel] seeds={seeds} workers={workers} smoke={args.smoke} "
-        f"use_hoel={use_hoel if use_hoel is not None else 'default'}"
-    )
+    print(f"[parallel] seeds={seeds} workers={workers} smoke={args.smoke}")
 
     results = []
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_worker, s, args.smoke, str(args.pkl), str(args.csv), use_hoel): s
+            pool.submit(_worker, s, args.smoke, str(args.pkl), str(args.csv)): s
             for s in seeds
         }
         for fut in as_completed(futures):

@@ -28,11 +28,6 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=None,
                     help="Graine (defaut: variable d'environnement SEED, sinon 0)")
     ap.add_argument("--smoke", action="store_true")
-    ap.add_argument(
-        "--no-hoel",
-        action="store_true",
-        help="MSE plate (protocole papier). Defaut: HOEL (asymetrique).",
-    )
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--pkl", type=Path, default=DEFAULT_PKL)
     ap.add_argument("--csv", type=Path, default=DEFAULT_CSV)
@@ -53,7 +48,6 @@ def main() -> None:
         out=args.out,
         pkl=args.pkl,
         csv=args.csv,
-        use_hoel=(False if args.no_hoel else None),
     )
     print(f"[done] seed={args.seed} → {result['out_dir']}")
 

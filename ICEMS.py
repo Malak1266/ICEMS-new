@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Leave-One-Participant-Out (LOPO) — LSTM+Transformer — Train-only normalization
+Leave-One-Trial-Out (LOOCV) — LSTM+Transformer — Train-only normalization
 
 Version multi-instruments (fenêtre unique par trial/intervalle):
 - Chaque fenêtre regroupe les 3 instruments (bipolar → scissors → cavitron) concaténés
@@ -621,97 +621,7 @@ def dict_to_arrays(d_pred: Dict[str,int], d_true: Dict[str,int]):
     ytru = np.array([d_true[e] for e in ents], dtype=np.int32)
     return ents, ytru, yhat
 
-# ------------- LOPO splits (no participant leak) -------------
-N_INTERNAL_VAL_PARTICIPANTS = 2
-EARLY_STOP_PATIENCE = 8
-
-def assert_disjoint_participant_splits(
-    external_test_pid: str,
-    internal_val_pids: List[str],
-    train_pids: List[str],
-) -> None:
-    """Raise if any participant appears in more than one split."""
-    splits = {
-        "external_test": {str(external_test_pid)},
-        "internal_val": {str(p) for p in internal_val_pids},
-        "train": {str(p) for p in train_pids},
-    }
-    for name_a, set_a in splits.items():
-        for name_b, set_b in splits.items():
-            if name_a >= name_b:
-                continue
-            overlap = set_a & set_b
-            if overlap:
-                raise ValueError(
-                    f"Participant leak: {sorted(overlap)} appear in both "
-                    f"'{name_a}' and '{name_b}'"
-                )
-
-def assert_train_participants_only(
-    part_array: np.ndarray,
-    allowed_pids: set,
-    context: str = "train",
-) -> None:
-    """Raise if any window belongs to a participant outside allowed_pids."""
-    actual = {str(p) for p in np.unique(part_array)}
-    forbidden = actual - {str(p) for p in allowed_pids}
-    if forbidden:
-        raise ValueError(
-            f"{context}: forbidden participants {sorted(forbidden)} "
-            f"(allowed: {sorted(allowed_pids)})"
-        )
-
-def oversample_by_y9(
-    X: np.ndarray,
-    y9: np.ndarray,
-    Yco: np.ndarray,
-    Ypgy: np.ndarray,
-    mask_res: np.ndarray,
-    parts: np.ndarray,
-    seed: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Sur-échantillonnage par classe y9 (train uniquement) ; conserve le champ participant."""
-    rng = np.random.default_rng(seed)
-    idx_by_c = {c: np.where(y9 == c)[0] for c in range(9)}
-    sizes = {c: len(v) for c, v in idx_by_c.items() if len(v) > 0}
-    if not sizes:
-        return X, y9, Yco, Ypgy, mask_res, parts
-    max_n = max(sizes.values())
-
-    new_indices = []
-    for c, idxs in idx_by_c.items():
-        if len(idxs) == 0:
-            continue
-        need = max_n - len(idxs)
-        if need > 0:
-            add = rng.choice(idxs, size=need, replace=True)
-            idxs = np.concatenate([idxs, add])
-        new_indices.extend(list(idxs))
-
-    new_indices = np.array(new_indices, dtype=np.int64)
-    rng.shuffle(new_indices)
-    return (
-        X[new_indices], y9[new_indices], Yco[new_indices],
-        Ypgy[new_indices], mask_res[new_indices], parts[new_indices],
-    )
-
-def select_internal_val_participants(
-    train_pool_pids: np.ndarray,
-    fold_idx: int,
-    n_val: int = N_INTERNAL_VAL_PARTICIPANTS,
-) -> np.ndarray:
-    """Tire n_val participants du pool d'entraînement (seed déterministe par fold)."""
-    pool = np.array(sorted({str(p) for p in train_pool_pids}), dtype=object)
-    if len(pool) < n_val:
-        raise ValueError(
-            f"Fold {fold_idx}: need {n_val} internal-val participants, "
-            f"only {len(pool)} available in train pool"
-        )
-    rng = np.random.default_rng(SEED + fold_idx)
-    chosen = rng.choice(pool, size=n_val, replace=False)
-    return np.asarray(chosen, dtype=object)
-
-# ------------- Main (LOPO by participants) -------------
+# ------------- Main (LOOCV by trials) -------------
 def main():
     print(f"📁 Loading: {DATA_PATH}")
     items = load_items(DATA_PATH)
@@ -731,141 +641,107 @@ def main():
     oof_prob9 = np.zeros((N,9), np.float32)
     fold_id   = np.zeros(N, np.int32)
 
-    uniq_parts = np.array(sorted(np.unique(part_ids)))
-    print(f"LOPO by participants: {len(uniq_parts)} unique participants")
+    uniq_trials = np.array(sorted(np.unique(trial_ids)))
+    print(f"LOOCV by trials: {len(uniq_trials)} unique trials")
 
-    def build_heads(idxs):
-        Yco = np.zeros((len(idxs), 4), np.float32)
-        Ypg = np.zeros((len(idxs), 6), np.float32)
-        Msk = np.zeros((len(idxs),), np.float32)
-        for i, gi in enumerate(idxs):
-            name = LEVEL9_ORDER[int(y9[gi])]
-            co, pgy, rm = to_coarse_and_pgy(name)
-            if co is not None and 0 <= co < 4:
-                Yco[i, co] = 1.0
-            if 0 <= pgy < 6:
-                Ypg[i, pgy] = 1.0
-            Msk[i] = rm
-        return Yco, Ypg, Msk
+    # Boucle Leave-One-Out
+    for fold_idx, val_trial in enumerate(uniq_trials, start=1):
+        va = np.where(trial_ids == val_trial)[0]
+        tr = np.where(trial_ids != val_trial)[0]
+        print(f"\n=== LOO fold {fold_idx}/{len(uniq_trials)} — val trial: {val_trial} ===")
 
-    # Boucle Leave-One-Participant-Out
-    for fold_idx, held_pid in enumerate(uniq_parts, start=1):
-        held_pid = str(held_pid)
-        ext_va = np.where(part_ids == held_pid)[0]
-        train_pool_pids = np.array(
-            sorted({str(p) for p in part_ids if str(p) != held_pid}), dtype=object
-        )
-        int_val_pids = select_internal_val_participants(train_pool_pids, fold_idx)
-        train_pids = np.array(
-            sorted(set(train_pool_pids) - set(int_val_pids)), dtype=object
-        )
+        Xtr_raw, Xva_raw = X_raw[tr], X_raw[va]
+        y9tr, y9va = y9[tr], y9[va]
 
-        assert_disjoint_participant_splits(held_pid, list(int_val_pids), list(train_pids))
-
-        int_va = np.where(np.isin(part_ids, int_val_pids))[0]
-        tr = np.where(np.isin(part_ids, train_pids))[0]
-
-        if len(ext_va) == 0:
-            print(f"\n=== LOPO fold {fold_idx}/{len(uniq_parts)} — skip (no windows for {held_pid}) ===")
-            continue
-
-        print(
-            f"\n=== LOPO fold {fold_idx}/{len(uniq_parts)} — held out: {held_pid} | "
-            f"internal val: {list(int_val_pids)} | train: {len(train_pids)} participants ==="
-        )
-
-        Xtr_raw, Xint_raw, Xext_raw = X_raw[tr], X_raw[int_va], X_raw[ext_va]
-        y9tr, y9int, y9ext = y9[tr], y9[int_va], y9[ext_va]
-        parts_tr_raw = part_ids[tr]
-
-        assert_train_participants_only(parts_tr_raw, set(train_pids), "train (pre-norm)")
-        assert_train_participants_only(part_ids[int_va], set(int_val_pids), "internal_val")
-        assert_train_participants_only(part_ids[ext_va], {held_pid}, "external_test")
+        # Heads (coarse/fine) + masque résident
+        def build_heads(idxs):
+            Yco = np.zeros((len(idxs),4), np.float32)
+            Ypg = np.zeros((len(idxs),6), np.float32)
+            Msk = np.zeros((len(idxs),),  np.float32)
+            for i, gi in enumerate(idxs):
+                name = LEVEL9_ORDER[int(y9[gi])]
+                co,pgy,rm = to_coarse_and_pgy(name)
+                if co is not None and 0<=co<4: Yco[i,co]=1.0
+                if 0<=pgy<6: Ypg[i,pgy]=1.0
+                Msk[i]=rm
+            return Yco, Ypg, Msk
 
         Yco_tr, Ypgy_tr, mask_tr = build_heads(tr)
-        Yco_int, Ypgy_int, mask_int = build_heads(int_va)
+        Yco_va, Ypgy_va, mask_va = build_heads(va)
 
-        # Normalisation calculée sur TRAIN uniquement (44 participants)
+        # Normalisation train-only
         mean_c, std_c = compute_train_norm_stats(Xtr_raw)
         Xtr = apply_norm(Xtr_raw, mean_c, std_c)
-        Xint = apply_norm(Xint_raw, mean_c, std_c)
-        Xext = apply_norm(Xext_raw, mean_c, std_c)
+        Xva = apply_norm(Xva_raw, mean_c, std_c)
 
-        # Sur-échantillonnage par classe sur le train seul (jamais val interne / externe)
-        Xtr, y9tr_bal, Yco_tr, Ypgy_tr, mask_tr, parts_tr_bal = oversample_by_y9(
-            Xtr, y9tr, Yco_tr, Ypgy_tr, mask_tr, parts_tr_raw, seed=SEED + fold_idx
-        )
-        allowed_train = set(train_pids)
-        assert_train_participants_only(parts_tr_bal, allowed_train, "train after oversampling")
-        leaked = set(map(str, parts_tr_bal)) & (set(map(str, int_val_pids)) | {held_pid})
-        if leaked:
-            raise ValueError(
-                f"Fold {fold_idx}: oversampled train contains validation/test participants: "
-                f"{sorted(leaked)}"
-            )
+        # Équilibrage simple par sur-échantillonnage sur y9
+        idx_by_c = {c: np.where(y9tr==c)[0] for c in range(9)}
+        sizes = {c: len(v) for c,v in idx_by_c.items() if len(v)>0}
+        max_n = max(sizes.values()) if sizes else 0
+        rng_local = np.random.default_rng(SEED+fold_idx)
+        new_tr_idx_rel = []
+        for c, idxs_rel in idx_by_c.items():
+            if len(idxs_rel)==0: continue
+            need = max_n - len(idxs_rel)
+            if need > 0:
+                add = rng_local.choice(idxs_rel, size=need, replace=True)
+                idxs_rel = np.concatenate([idxs_rel, add])
+            new_tr_idx_rel.extend(list(idxs_rel))
+        new_tr_idx_rel = np.array(new_tr_idx_rel, np.int64)
+        rng_local.shuffle(new_tr_idx_rel)
+
+        # Remap des têtes/masques
+        Xtr = Xtr[new_tr_idx_rel]
+        y9tr_bal = y9tr[new_tr_idx_rel]
+        Yco_tr = Yco_tr[new_tr_idx_rel]
+        Ypgy_tr= Ypgy_tr[new_tr_idx_rel]
+        mask_tr= mask_tr[new_tr_idx_rel]
 
         # Modèle
         model = build_multitask(SEQ_LEN, Xtr.shape[2], n_coarse=4, n_fine=6)
 
         class ValBalancedAcc9(keras.callbacks.Callback):
-            """Balanced accuracy 9 classes sur validation INTERNE (jamais le participant tenu out)."""
             def on_epoch_end(self, epoch, logs=None):
-                p_coarse, p_fine = predict_heads(self.model, Xint)
+                p_coarse, p_fine = predict_heads(self.model, Xva)
                 P9 = reconstruct_level9_from_heads(p_coarse, p_fine)
                 yhat9 = np.argmax(P9, axis=1)
-                bacc9 = balanced_accuracy_np(y9int, yhat9, 9)
-                print(f"  -> internal_val_balanced_acc9 = {bacc9:.4f}")
+                bacc9 = balanced_accuracy_np(y9va, yhat9, 9)
+                print(f"  -> val_balanced_acc9 = {bacc9:.4f}")
 
-        early_stop = keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            mode="min",
-            patience=EARLY_STOP_PATIENCE,
-            restore_best_weights=True,
-            verbose=1,
-        )
-        rlrop = keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss", mode="min", factor=0.5, patience=4, verbose=1
-        )
+        rlrop = keras.callbacks.ReduceLROnPlateau(monitor="val_loss", mode="min",
+                                                  factor=0.5, patience=4, verbose=1)
 
         sw_coarse_tr = np.ones(len(Xtr), dtype=np.float32)
-        sw_fine_tr = mask_tr.astype(np.float32)
-        sw_coarse_int = np.ones(len(Xint), dtype=np.float32)
-        sw_fine_int = mask_int.astype(np.float32)
+        sw_fine_tr   = mask_tr.astype(np.float32)
+        sw_coarse_va = np.ones(len(Xva), dtype=np.float32)
+        sw_fine_va   = mask_va.astype(np.float32)
 
         model.fit(
             Xtr, {"coarse": Yco_tr, "fine": Ypgy_tr},
-            validation_data=(
-                Xint,
-                {"coarse": Yco_int, "fine": Ypgy_int},
-                {"coarse": sw_coarse_int, "fine": sw_fine_int},
-            ),
+            validation_data=(Xva, {"coarse": Yco_va, "fine": Ypgy_va},
+                             {"coarse": sw_coarse_va, "fine": sw_fine_va}),
             epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=2,
-            callbacks=[ValBalancedAcc9(), early_stop, rlrop],
-            sample_weight={"coarse": sw_coarse_tr, "fine": sw_fine_tr},
+            callbacks=[ValBalancedAcc9(), rlrop],
+            sample_weight={"coarse": sw_coarse_tr, "fine": sw_fine_tr}
         )
 
-        # Évaluation OOF : participant externe uniquement après entraînement (predict seul)
-        p_coarse, p_fine = predict_heads(model, Xext)
-        P9_ext = reconstruct_level9_from_heads(p_coarse, p_fine)
-        yhat9_ext = np.argmax(P9_ext, axis=1)
+        # Validation sur le trial laissé de côté
+        p_coarse, p_fine = predict_heads(model, Xva)
+        P9_va = reconstruct_level9_from_heads(p_coarse, p_fine)
+        yhat9_va = np.argmax(P9_va, axis=1)
 
-        oof_pred9[ext_va] = yhat9_ext
-        oof_prob9[ext_va] = P9_ext
-        fold_id[ext_va] = fold_idx
+        oof_pred9[va] = yhat9_va
+        oof_prob9[va] = P9_va
+        fold_id[va]   = fold_idx
 
-        acc = (y9ext == yhat9_ext).mean()
-        bacc = balanced_accuracy_np(y9ext, yhat9_ext, 9)
-        print(f"[LOPO {fold_idx}] held_out={held_pid} acc9={acc:.4f} | bal_acc9={bacc:.4f}")
+        acc = (y9va == yhat9_va).mean()
+        bacc= balanced_accuracy_np(y9va, yhat9_va, 9)
+        print(f"[LOO {fold_idx}] acc9={acc:.4f} | bal_acc9={bacc:.4f}")
 
-        # Importance par canal sur le participant tenu out (post-entraînement, pas utilisé pour fit)
-        imp_perm = _channel_importance(
-            model, Xext, y9ext, kept_names, mode="perm", repeats=3,
-            max_val_samples=800, rng_seed=SEED + fold_idx,
-        )
-        imp_zero = _channel_importance(
-            model, Xext, y9ext, kept_names, mode="zero", repeats=1,
-            max_val_samples=800, rng_seed=SEED + fold_idx,
-        )
+        # === Importance par canal sur le trial de validation ===
+        # (on reste sur Xva normalisé)
+        imp_perm = _channel_importance(model, Xva, y9va, kept_names, mode="perm", repeats=3, max_val_samples=800, rng_seed=SEED+fold_idx)
+        imp_zero = _channel_importance(model, Xva, y9va, kept_names, mode="zero", repeats=1, max_val_samples=800, rng_seed=SEED+fold_idx)
 
         dfp = pd.DataFrame(imp_perm["per_channel"])
         dfz = pd.DataFrame(imp_zero["per_channel"])
