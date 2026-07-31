@@ -1,0 +1,29 @@
+{
+  "seed": 42,
+  "sample_rate_hz": 10.0,
+  "feature_names": [
+    "bip_v",
+    "bip_a",
+    "bip_j",
+    "sci_v",
+    "sci_a",
+    "sci_j",
+    "cav_v",
+    "cav_a",
+    "cav_j",
+    "dist_bip_cav"
+  ],
+  "mask_names": [
+    "track_bipolar",
+    "track_scissors",
+    "track_cavitron"
+  ],
+  "n_trials": 136,
+  "n_participants": 47,
+  "policy": {
+    "kinematic_mask": "tracking_flag (no fallback to inuse_flag or captured_flag)",
+    "feature_zeroing": "none — real kinematics preserved; validity in mask_tracking (T,3)",
+    "distance_mask": "bidist_captured_flag documented separately; distance not zeroed",
+    "alignment": "T = min longueur commune sur tous les instruments/métriques du trial"
+  }
+}
